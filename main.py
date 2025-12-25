@@ -174,21 +174,22 @@ class SkySwitcher:
     def get_clipboard(self):
         try:
             return subprocess.run(['wl-paste', '-n'], capture_output=True, text=True).stdout
-        except:
+        except Exception:
             return ""
 
     def set_clipboard(self, text):
         try:
             p = subprocess.Popen(['wl-copy', '-n'], stdin=subprocess.PIPE, text=True)
             p.communicate(input=text)
-        except:
+        except Exception:
             pass
 
     def wait_for_new_content(self, timeout=0.5):
         start = time.time()
         while time.time() - start < timeout:
             content = self.get_clipboard()
-            if content: return content
+            if content:
+                return content
             time.sleep(0.02)
         return None
 
@@ -260,7 +261,7 @@ class SkySwitcher:
         try:
             self.device.grab()
             self.device.ungrab()
-        except:
+        except Exception:
             logger.warning("⚠️ Device grabbed. Running passive.")
 
         try:
