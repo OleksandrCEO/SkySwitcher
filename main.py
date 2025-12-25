@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # main.py
 
-"""
-SkySwitcher v0.4.1
-Merged functionality:
-- Core Logic: Robust v0.3.8 architecture (Reliable clipboard, no sudo hacks).
-- CLI Features: Restored v0.2.1 arguments (--list, --device, --verbose).
-- Fix: Added release validation to prevent accidental triggering while holding Shift.
-"""
+# SkySwitcher v0.4.1
+# Merged functionality:
+# - Core Logic: Robust v0.3.8 architecture (Reliable clipboard, no sudo hacks).
+# - CLI Features: Restored v0.2.1 arguments (--list, --device, --verbose).
+# - Fix: Added release validation to prevent accidental triggering while holding Shift.
 
 import sys
 import time
@@ -83,8 +81,11 @@ class DeviceManager:
 
         for dev in devices:
             name_lower = dev.name.lower()
-            if any(bad in name_lower for bad in DeviceManager.IGNORED_KEYWORDS): continue
-            if e.EV_KEY not in dev.capabilities(): continue
+            if any(bad in name_lower for bad in DeviceManager.IGNORED_KEYWORDS):
+                continue
+
+            if e.EV_KEY not in dev.capabilities():
+                continue
 
             supported_keys = set(dev.capabilities()[e.EV_KEY])
             if DeviceManager.REQUIRED_KEYS.issubset(supported_keys):
@@ -109,7 +110,7 @@ class TextProcessor:
         self.map_dst_to_src = str.maketrans(self.dst_chars, self.src_chars)
         self.src_unique = set(self.src_chars) - set(self.dst_chars)
         self.dst_unique = set(self.dst_chars) - set(self.src_chars)
-        logger.info(f"🌍 Languages: US <-> UA")
+        logger.info("🌍 Languages: US <-> UA")
 
     def smart_translate(self, text):
         src_score = sum(1 for c in text if c in self.src_unique)
@@ -157,10 +158,15 @@ class SkySwitcher:
         self.mode2_modifier = e.KEY_RIGHTCTRL
 
     def send_combo(self, *keys):
-        for k in keys: self.ui.write(e.EV_KEY, k, 1)
+        for k in keys:
+            self.ui.write(e.EV_KEY, k, 1)
+
         self.ui.syn()
         time.sleep(0.02)
-        for k in reversed(keys): self.ui.write(e.EV_KEY, k, 0)
+
+        for k in reversed(keys):
+            self.ui.write(e.EV_KEY, k, 0)
+
         self.ui.syn()
         time.sleep(0.02)
 
