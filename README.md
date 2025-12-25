@@ -1,80 +1,155 @@
 # SkySwitcher 🌌
 
-A minimalist keyboard layout switcher for Linux (Wayland/NixOS).
-It detects a double press of `Right Shift`, corrects the last typed word, and switches its layout (e.g., English <-> Ukrainian).
+![NixOS](https://img.shields.io/badge/NixOS-25.11+-5277C3?style=flat&logo=nixos&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-**Security Focus:** This installation method compiles the script into the immutable Nix Store, preventing unauthorized modifications by user-level malware.
+**SkySwitcher** is a minimalist, context-aware keyboard layout switcher for Linux (Wayland & X11). It fixes what you just typed without making you retype it.
 
-## 📋 Prerequisites
+Designed with **NixOS Flakes** in mind for reproducible and secure deployment.
 
-To allow Python to read input and simulate keys, you need to enable `uinput` and grant permissions.
+## ✨ Features
 
-**1. Clone the repository to a permanent location:**
-   
-       mkdir -p ~/dev/system
-       cd ~/dev/system
-       git clone https://github.com/OleksandrCEO/SkySwitcher.git
-       
-   *(Note the path: `/home/YOUR_USER/dev/system/SkySwitcher/main.py`)*
+- **⚡ Double Right Shift:** Tap `Right Shift` twice to switch layout (e.g., English ↔ Ukrainian).
+- **📝 Auto-Correction:** It automatically corrects the **last typed word** when you switch.
+  - *Typed `ghbdsn`? -> Double Shift -> Becomes `привіт`.*
+- **🎯 Selection Fix:** Hold `Right Ctrl` + press `Right Shift` to fix the currently **selected text**.
+- **🔒 Secure:** Runs with standard user permissions (via `uinput` group), no `sudo` required after setup.
+- **❄️ Pure Nix:** Zero global dependencies. Builds cleanly from the Nix Store.
 
-**2. Configure NixOS:**
+---
 
-Add the following to your `/etc/nixos/configuration.nix`. 
-Replace `YOUR_USER` with your actual username!
+## 🚀 Quick Install (Imperative)
 
-    { config, pkgs, ... }: {
-      
-      # --- Hardware & Permissions ---
-      hardware.uinput.enable = true;
-      users.users.YOUR_USER.extraGroups = [ "input" "uinput" ];
+If you just want to try it out without modifying your system config:
+
+    # Run directly from GitHub
+    nix run github:OleksandrCEO/SkySwitcher -- --help
+
+    # Or install to your profile
+    nix profile install github:OleksandrCEO/SkySwitcher
+
+---
+
+## ❄️ NixOS Installation (Declarative)
+
+The recommended way to install SkySwitcher is via **Flakes**. This ensures the script is built using your system's libraries (saving disk space) and is available globally as `skyswitcher`.
+
+### 1. Add Input
+Add the repository to your `/etc/nixos/flake.nix`:
+
+    inputs = {
+      nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
+
+      skyswitcher = {
+        url = "github:OleksandrCEO/SkySwitcher";
+        inputs.nixpkgs.follows = "nixpkgs"; # Uses your system's libs to save space
+      };
+    };
+
+### 2. Configure Overlay & Package
+Pass the input to your outputs and apply the overlay. This makes `skyswitcher` available in `pkgs`.
+
+    # /etc/nixos/flake.nix
+    {
+      inputs = {
+        # Use the same NixOS version as your system
+        nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
     
-      # --- Install SkySwitcher Securely ---
-      environment.systemPackages = with pkgs; [ 
-        wl-clipboard  # Required dependency
-        
-        # This creates an immutable binary in /nix/store
-        (writers.writePython3Bin "skyswitcher" {
-          libraries = [ python3Packages.evdev ];
-        } (builtins.readFile /home/YOUR_USER/dev/system/SkySwitcher/main.py))
-      ];
+        # Add SkySwitcher input
+        skyswitcher = {
+          url = "github:OleksandrCEO/SkySwitcher";
+          inputs.nixpkgs.follows = "nixpkgs"; # Optimization: use system packages
+        };
+      };
+    
+      outputs = { self, nixpkgs, skyswitcher, ... }: {
+        nixosConfigurations.my-machine = nixpkgs.lib.nixosSystem {
+          system = "x86_64-linux";
+          modules = [
+            ./configuration.nix
+            
+            # --- The Integration Part ---
+            ({ config, pkgs, ... }: {
+              # 1. Overlay: Makes 'skyswitcher' available in pkgs
+              nixpkgs.overlays = [
+                (final: prev: {
+                  skyswitcher = skyswitcher.packages.${prev.system}.default;
+                })
+              ];
+    
+              # 2. Install
+              environment.systemPackages = [ pkgs.skyswitcher ];
+    
+              # 3. Permissions (Required for uinput)
+              hardware.uinput.enable = true;
+              users.users.YOUR_USERNAME.extraGroups = [ "uinput" "input" ];
+            })
+          ];
+        };
+      };
     }
 
-> **Important:** Run `sudo nixos-rebuild switch` and **REBOOT** your system to apply group permissions.
+> **Note:** Don't forget to replace `YOUR_USERNAME` with your actual username.
+> Run `sudo nixos-rebuild switch` and **reboot** to apply group permissions.
 
-## 🚀 Usage
+---
 
-Since SkySwitcher is now a system package, you can run it from anywhere in the terminal:
+## 🤖 Auto-Start (Systemd)
 
-       skyswitcher --verbose
+To make SkySwitcher run automatically in the background:
 
-### Arguments
-- `--verbose` (`-v`): Show logs (detected keys, conversions).
-- `--device` (`-d`): Manually specify input device path.
-- `--list`: List all detected input devices and exit.
+### Option A: Home Manager (Recommended)
 
-## 🤖 Auto-start (Systemd)
+    systemd.user.services.skyswitcher = {
+      Unit = {
+        Description = "SkySwitcher Layout Corrector";
+        After = [ "graphical-session.target" ];
+      };
+      Service = {
+        ExecStart = "${pkgs.skyswitcher}/bin/skyswitcher";
+        Restart = "always";
+      };
+      Install = {
+        WantedBy = [ "graphical-session.target" ];
+      };
+    };
 
-To run SkySwitcher automatically in the background:
+### Option B: Manual Systemd
+Create `~/.config/systemd/user/skyswitcher.service`:
 
-1. Create `~/.config/systemd/user/skyswitcher.service`:
+    [Unit]
+    Description=SkySwitcher Layout Corrector
+    After=graphical-session.target
 
-       [Unit]
-       Description=SkySwitcher Layout Corrector
-       After=graphical-session.target
-       
-       [Service]
-       # Now we just call the system command
-       ExecStart=skyswitcher
-       Restart=always
-       RestartSec=5
-       
-       [Install]
-       WantedBy=default.target
+    [Service]
+    ExecStart=/run/current-system/sw/bin/skyswitcher
+    Restart=always
 
-2. Enable and start:
+    [Install]
+    WantedBy=default.target
 
-       systemctl --user enable --now skyswitcher
+Then enable it: `systemctl --user enable --now skyswitcher`
 
-3. Check status:
+---
 
-       systemctl --user status skyswitcher
+## 🛠️ Usage & Troubleshooting
+
+**Manual Run:**
+
+    skyswitcher --verbose
+
+**Arguments:**
+- `-v, --verbose`: Show debug logs (key presses, conversions).
+- `-d, --device`: Manually specify input device path.
+- `--list`: List available input devices.
+
+**Common Issues:**
+- *Permission Denied:* Ensure your user is in the `input` and `uinput` groups.
+- *Wayland Clipboard:* Ensure `wl-clipboard` is installed (it is included in dependencies, but check your environment).
+
+---
+
+## 📜 License
+
+MIT License. Feel free to use and modify.
