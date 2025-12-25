@@ -1,3 +1,5 @@
+# default.nix
+
 { pkgs ? import <nixpkgs> {} }:
 
 let

@@ -1,4 +1,5 @@
 # flake.nix
+
 {
   description = "SkySwitcher";
 
@@ -22,5 +23,9 @@
           evtest
         ];
       };
+
+      # ЕКСПОРТУЄМО МОДУЛЬ
+      nixosModules.default = import ./module.nix;
+
     };
 }

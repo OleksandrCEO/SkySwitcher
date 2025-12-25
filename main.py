@@ -1,4 +1,7 @@
+
 #!/usr/bin/env python3
+# main.py
+
 """
 SkySwitcher v0.4.0
 Merged functionality:
