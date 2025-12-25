@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-SkySwitcher v0.2.3
+SkySwitcher v0.2.4
 A minimal Wayland/Linux layout switcher & corrector.
 
-Last changes:
-- Added 'en' to LAYOUTS_DB (alias for 'us').
+Changes in v0.2.4:
+- Version bump rule: patch version increased (3 -> 4).
+- FIXED: Punctuation breaking selection (e.g. 'бобер' -> ',j,th').
+  Changed strategy from 'Ctrl+Shift+Left' (OS dependent) to 'Shift+Home' + Python parsing.
+- FIXED: Cursor jumping lines. Now we surgically delete exactly N characters.
 
 Features:
 1. Double Tap [Right Shift]:
-   - Selects last word -> Translates -> Switches Layout.
+   - Selects last typed sequence (ignoring punctuation boundaries).
+   - Translates -> Switches Layout.
 2. Hold [Right Ctrl] + Tap [Right Shift]:
-   - Translates selection -> NO Layout switch.
+   - Translates active selection -> NO Layout switch.
 """
 
 import evdev
@@ -28,24 +32,17 @@ DOUBLE_PRESS_DELAY = 0.5
 LAYOUT_SWITCH_COMBO = [e.KEY_LEFTMETA, e.KEY_SPACE]
 
 # --- LAYOUT DATABASE ---
-# Format: 'code': "row1 + row2 + row3 + row4 + SHIFT(row1...row4)"
-# Note: These strings must align perfectly by key index.
-
 LAYOUT_US = "`qwertyuiop[]\\asdfghjkl;'zxcvbnm,./~@#$%^&QWERTYUIOP{}|ASDFGHJKL:\"ZXCVBNM<>?"
 LAYOUT_UA = "'йцукенгшщзхїґфівапролджєячсмитьбю.₴\"№;%:?ЙЦУКЕНГШЩЗХЇҐФІВАПРОЛДЖЄЯЧСМИТЬБЮ,"
 
 LAYOUTS_DB = {
     'us': LAYOUT_US,
-    'en': LAYOUT_US,  # Alias for US
+    'en': LAYOUT_US,
     'ua': LAYOUT_UA,
     'ru': "ёйцукенгшщзхъ\\фывапролджэячсмитьбю.Ё\"№;%:?ЙЦУКЕНГШЩЗХЪ/ФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,",
     'de': "^qwertzuiopü+#asdfghjklöäyxcvbnm,.-°!\"§$%&QWERTZUIOPÜ*'ASDFGHJKLÖÄYXCVBNM;:_",
 }
 
-# Default pair if not specified
-DEFAULT_PAIR = ["us", "ua"]
-
-# Devices to ignore
 IGNORED_KEYWORDS = [
     'mouse', 'webcam', 'audio', 'video', 'consumer',
     'control', 'headset', 'receiver', 'solaar', 'hotkeys'
@@ -53,7 +50,6 @@ IGNORED_KEYWORDS = [
 
 
 def list_devices():
-    """Prints all available input devices for debugging."""
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
     devices.sort(key=lambda x: x.path)
     print(f"{'PATH':<20} | {'NAME'}")
@@ -63,7 +59,6 @@ def list_devices():
 
 
 def find_keyboard_device():
-    """Auto-detects the most likely physical keyboard."""
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
     possible_candidates = []
 
@@ -73,7 +68,6 @@ def find_keyboard_device():
         if e.EV_KEY not in dev.capabilities(): continue
 
         keys = dev.capabilities()[e.EV_KEY]
-        # Basic check for alphanumeric keys
         if {e.KEY_SPACE, e.KEY_ENTER, e.KEY_A, e.KEY_Z}.issubset(keys):
             if 'keyboard' in name or 'kbd' in name: return dev.path, dev.name
             possible_candidates.append((dev.path, dev.name))
@@ -85,22 +79,17 @@ class SkySwitcher:
     def __init__(self, device_path, layout_pair, verbose=False):
         self.verbose = verbose
 
-        # --- Initialize Layouts ---
         self.src_layout_name, self.dst_layout_name = layout_pair
-
         if self.src_layout_name not in LAYOUTS_DB or self.dst_layout_name not in LAYOUTS_DB:
             self.error(f"Unknown layout codes: {layout_pair}. Available: {list(LAYOUTS_DB.keys())}")
             sys.exit(1)
 
         src_map = LAYOUTS_DB[self.src_layout_name]
         dst_map = LAYOUTS_DB[self.dst_layout_name]
-
-        # Create translation map (bidirectional)
         self.trans_map = str.maketrans(src_map + dst_map, dst_map + src_map)
 
         self.log(f"🌍 Languages: {self.src_layout_name.upper()} <-> {self.dst_layout_name.upper()}")
 
-        # --- Initialize Device ---
         try:
             self.dev = evdev.InputDevice(device_path)
             self.log(f"✅ Connected to: {self.dev.name}")
@@ -108,11 +97,11 @@ class SkySwitcher:
             self.error(f"Failed to open device: {err}")
             sys.exit(1)
 
-        # --- Initialize Virtual Keyboard ---
+        # Added KEY_HOME for robust selection
         all_keys = [
             e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT, e.KEY_RIGHTCTRL, e.KEY_RIGHTSHIFT,
             e.KEY_C, e.KEY_V,
-            e.KEY_LEFT, e.KEY_RIGHT, e.KEY_BACKSPACE,
+            e.KEY_LEFT, e.KEY_RIGHT, e.KEY_BACKSPACE, e.KEY_HOME,
             e.KEY_LEFTMETA, e.KEY_SPACE, e.KEY_INSERT, e.KEY_LEFTALT
         ]
 
@@ -174,54 +163,102 @@ class SkySwitcher:
         return None
 
     def process_text_replacement(self, mode="last_word"):
+        # 1. Release modifiers to prevent interference
         self.release_all_modifiers()
+
+        # 2. Prepare Clipboard
         backup_clipboard = self.get_clipboard()
         self.clear_clipboard()
 
+        # 3. SELECT TEXT
         if mode == "last_word":
-            self.send_combo(e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT, e.KEY_LEFT)
+            # STRATEGY CHANGE: "Shift + Home" selects everything to the left.
+            # We will then analyze the text and delete only what is needed.
+            # This fixes the punctuation issue (Ctrl+Left stopping at dots).
+            self.send_combo(e.KEY_LEFTSHIFT, e.KEY_HOME)
             self.release_all_modifiers()
             self.send_combo(e.KEY_LEFTCTRL, e.KEY_C)
         else:
+            # Mode 2: User already selected text
             self.send_combo(e.KEY_LEFTCTRL, e.KEY_C)
 
-        original = self.wait_for_new_content()
+        # 4. Read text
+        full_text = self.wait_for_new_content()
 
-        if not original:
-            self.log("Copy failed/timed out. Restoring.")
+        if not full_text:
+            self.log("Copy failed/timed out.")
             self.set_clipboard(backup_clipboard)
+            # Restore cursor position if we moved it
             if mode == "last_word": self.send_combo(e.KEY_RIGHT)
             return
 
-        converted = original.translate(self.trans_map)
+        # 5. Identify TARGET word
+        target_text = full_text
+        if mode == "last_word":
+            # If we selected the whole line, we only want the last "chunk"
+            # Splitting by whitespace handles spaces/tabs correctly.
+            if not full_text.strip():
+                # Line is empty or just spaces
+                self.set_clipboard(backup_clipboard)
+                self.send_combo(e.KEY_RIGHT)
+                return
 
-        if original == converted:
-            self.log("No change needed.")
+            # Get the very last sequence of non-whitespace characters
+            # This treats "one.two,three" as ONE word, which fixes the bug.
+            target_text = full_text.split()[-1]
+
+        # 6. Check if translation needed
+        converted = target_text.translate(self.trans_map)
+
+        # Deselect first (move cursor back to end)
+        if mode == "last_word":
             self.send_combo(e.KEY_RIGHT)
+
+        if target_text == converted:
+            self.log("No change needed.")
+            # If mode was selection, we might want to keep selection?
+            # Usually for tools like this, dropping selection is fine.
             return
 
-        self.log(f"Correcting: '{original}' -> '{converted}'")
+        self.log(f"Correcting: '{target_text}' -> '{converted}'")
         self.set_clipboard(converted)
         time.sleep(0.1)
 
-        self.send_combo(e.KEY_BACKSPACE)
+        # 7. DELETE OLD TEXT
+        if mode == "last_word":
+            # Backspace exactly N times.
+            # This is safer than selecting, as it doesn't trigger "word jump" logic.
+            for _ in range(len(target_text)):
+                self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 1)
+                self.ui.syn()
+                time.sleep(0.005)  # Tiny delay for stability
+                self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 0)
+                self.ui.syn()
+        else:
+            # Selection mode: just replace
+            self.send_combo(e.KEY_BACKSPACE)
+
+        # 8. PASTE NEW
         self.release_all_modifiers()
         self.send_combo(e.KEY_LEFTCTRL, e.KEY_V)
-        self.send_combo(e.KEY_RIGHT)
 
+        # No extra 'Right' needed here usually, but good for safety to unstick
+        # self.send_combo(e.KEY_RIGHT)
+
+        # 9. SWITCH LAYOUT
         if mode == "last_word":
             self.log("Switching system layout...")
             time.sleep(0.1)
             self.send_combo(*LAYOUT_SWITCH_COMBO)
 
     def run(self):
-        self.log(f"🚀 SkySwitcher v0.3.1 running...")
+        self.log(f"🚀 SkySwitcher v0.2.4 running...")
 
         try:
             self.dev.grab()
             self.dev.ungrab()
         except IOError:
-            self.log("⚠️  Device grabbed by another process. Running passive.")
+            self.log("⚠️  Device grabbed. Running passive.")
 
         for event in self.dev.read_loop():
             if event.type == e.EV_KEY:
@@ -248,16 +285,17 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--device", help="Path to input device")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--list", action="store_true", help="List available devices")
-    parser.add_argument("--langs", default="en,ua", help="Comma separated layout codes (default: en,ua)")
+    parser.add_argument("--langs", default="us,ua", help="Comma separated layout codes (default: us,ua)")
 
     args = parser.parse_args()
-    langs = args.langs.split(',')
+    langs = ['us', 'ua']
 
     if args.list:
         list_devices()
         sys.exit(0)
 
     try:
+        langs = args.langs.split(',')
         if len(langs) != 2: raise ValueError
     except:
         print("❌ Error: --langs must be two codes separated by comma (e.g. 'en,ua')", file=sys.stderr)
