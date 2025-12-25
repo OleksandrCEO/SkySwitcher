@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-SkySwitcher v0.3.0 (Architecture Rewrite)
-Key-buffer based layout switcher. NO CLIPBOARD dependency.
+SkySwitcher v0.3.1
+Key-buffer based layout switcher with Time-based reset.
 
-Mechanism:
-1. Passive recording of keystrokes + modifier states into a buffer.
-2. On trigger: Delete text (Backspace * N) -> Switch Layout -> Replay keystrokes.
-3. Result: The OS handles the character mapping logic naturally.
-
-Benefits: Works in Terminals, Password fields, VIM, etc.
+Changes in v0.3.1:
+- LOGIC CHANGE: 'Space' no longer resets the buffer. You can now correct phrases!
+- NEW FEATURE: Buffer resets only after IDLE_TIMEOUT (default 3.0s) or non-text keys (Esc, Arrows).
+- BUGFIX: Increased delay after Layout Switch to preventing typing before OS switches language.
 """
 
 import evdev
@@ -21,27 +19,38 @@ from collections import deque
 # --- CONFIGURATION ---
 TRIGGER_BTN = e.KEY_RIGHTSHIFT
 DOUBLE_PRESS_DELAY = 0.5
+
+# How long to wait for OS to switch layout (Super+Space) before retyping.
+# Increase this if text is retyped in the WRONG layout.
+LAYOUT_SWITCH_DELAY = 0.3
+
+# If you stop typing for this many seconds, the buffer clears.
+BUFFER_IDLE_TIMEOUT = 3.0
+
+# Max characters to remember (sliding window)
+MAX_BUFFER_SIZE = 200
+
 LAYOUT_SWITCH_COMBO = [e.KEY_LEFTMETA, e.KEY_SPACE]
 
-# Keys that constitute a "word" (letters, numbers, basic punctuation)
-# We track these to know what to delete and replay.
+# Keys to record (Letters + Numbers + Symbols + SPACE)
 PRINTABLE_KEYS = {
     e.KEY_1, e.KEY_2, e.KEY_3, e.KEY_4, e.KEY_5, e.KEY_6, e.KEY_7, e.KEY_8, e.KEY_9, e.KEY_0,
-    e.KEY_MINUS, e.KEY_EQUAL, e.KEY_BACKSPACE,
+    e.KEY_MINUS, e.KEY_EQUAL, e.KEY_BACKSPACE, e.KEY_SPACE,  # Space is now printable!
     e.KEY_Q, e.KEY_W, e.KEY_E, e.KEY_R, e.KEY_T, e.KEY_Y, e.KEY_U, e.KEY_I, e.KEY_O, e.KEY_P,
     e.KEY_LEFTBRACE, e.KEY_RIGHTBRACE, e.KEY_BACKSLASH,
     e.KEY_A, e.KEY_S, e.KEY_D, e.KEY_F, e.KEY_G, e.KEY_H, e.KEY_J, e.KEY_K, e.KEY_L,
     e.KEY_SEMICOLON, e.KEY_APOSTROPHE,
     e.KEY_Z, e.KEY_X, e.KEY_C, e.KEY_V, e.KEY_B, e.KEY_N, e.KEY_M,
     e.KEY_COMMA, e.KEY_DOT, e.KEY_SLASH,
-    e.KEY_GRAVE  # The `~ key
+    e.KEY_GRAVE, e.KEY_102ND  # Typical on ISO keyboards
 }
 
-# Keys that should RESET the buffer (Word separators or navigation)
+# Keys that HARD RESET the buffer (Navigation, Esc, Tab)
 RESET_KEYS = {
-    e.KEY_SPACE, e.KEY_ENTER, e.KEY_TAB, e.KEY_ESC,
+    e.KEY_ENTER, e.KEY_TAB, e.KEY_ESC,
     e.KEY_UP, e.KEY_DOWN, e.KEY_LEFT, e.KEY_RIGHT,
-    e.KEY_HOME, e.KEY_END, e.KEY_PAGEUP, e.KEY_PAGEDOWN
+    e.KEY_HOME, e.KEY_END, e.KEY_PAGEUP, e.KEY_PAGEDOWN,
+    e.KEY_DELETE
 }
 
 IGNORED_KEYWORDS = [
@@ -81,10 +90,11 @@ class SkySwitcher:
         self.verbose = verbose
 
         # Buffer stores tuples: (key_code, is_shift_held)
-        self.key_buffer = deque(maxlen=50)
+        self.key_buffer = deque(maxlen=MAX_BUFFER_SIZE)
 
         # State tracking
-        self.last_press_time = 0
+        self.last_press_time = 0  # For Double Shift
+        self.last_typing_time = 0  # For Idle Timeout
         self.shift_pressed = False
 
         # --- Device Setup ---
@@ -95,7 +105,7 @@ class SkySwitcher:
             self.error(f"Failed to open device: {err}")
             sys.exit(1)
 
-        # Virtual Keyboard for replaying
+        # Virtual Keyboard
         try:
             self.ui = UInput(name="SkySwitcher-Virtual")
         except Exception as err:
@@ -109,7 +119,6 @@ class SkySwitcher:
         print(f"❌ {msg}", file=sys.stderr)
 
     def send_combo(self, *keys):
-        """Simulate pressing a combination of keys."""
         for k in keys: self.ui.write(e.EV_KEY, k, 1)
         self.ui.syn()
         time.sleep(0.02)
@@ -117,36 +126,34 @@ class SkySwitcher:
         self.ui.syn()
         time.sleep(0.02)
 
-    def correct_last_word(self):
-        """
-        The Core Magic:
-        1. Backspace existing word.
-        2. Switch Layout.
-        3. Replay keys from buffer.
-        """
+    def correct_last_phrase(self):
         if not self.key_buffer:
-            self.log("Buffer empty, nothing to correct.")
+            self.log("Buffer empty.")
             return
 
-        word_len = len(self.key_buffer)
-        self.log(f"⚡ Correcting word (length {word_len})...")
+        chars_to_delete = len(self.key_buffer)
+        self.log(f"⚡ Correcting phrase ({chars_to_delete} chars)...")
 
-        # 1. Delete current text
-        for _ in range(word_len):
+        # 1. Backspace everything
+        # Optimized for speed, but safe enough not to skip
+        for _ in range(chars_to_delete):
             self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 1)
             self.ui.syn()
-            time.sleep(0.005)  # Super fast typing
             self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 0)
             self.ui.syn()
+            time.sleep(0.002)  # Very fast backspace
 
         time.sleep(0.05)
 
-        # 2. Switch System Layout
+        # 2. Switch Layout
+        self.log("Switching layout...")
         self.send_combo(*LAYOUT_SWITCH_COMBO)
-        time.sleep(0.1)  # Wait for OS to switch
+
+        # CRITICAL: Wait for OS to actually switch input methods
+        time.sleep(LAYOUT_SWITCH_DELAY)
 
         # 3. Replay Keys
-        # We must replay them exactly as they were typed (preserving Shift state)
+        self.log("Replaying...")
         for key_code, was_shifted in self.key_buffer:
             if was_shifted:
                 self.ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1)
@@ -161,13 +168,19 @@ class SkySwitcher:
                 self.ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)
                 self.ui.syn()
 
-            # Tiny delay to simulate natural typing flow (prevents missing chars)
-            time.sleep(0.01)
+            time.sleep(0.005)  # Typing speed
 
         self.log("Done.")
 
+        # Clear buffer to avoid double-correction loops
+        # (Since we replayed keys, we don't want to re-add them to our own buffer if we were listening to virtual)
+        # But we listen to HARDWARE. So we don't hear our own typing.
+        # However, logically, after correction, we start "fresh".
+        self.key_buffer.clear()
+        self.last_typing_time = time.time()  # Reset idle timer
+
     def run(self):
-        self.log(f"🚀 SkySwitcher v0.3.0 (KeyBuffer Engine) running...")
+        self.log(f"🚀 SkySwitcher v0.3.1 (Timeout {BUFFER_IDLE_TIMEOUT}s) running...")
 
         try:
             self.dev.grab()
@@ -180,61 +193,44 @@ class SkySwitcher:
                 # --- 1. Track Shift State ---
                 if event.code in [e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT]:
                     self.shift_pressed = (event.value == 1 or event.value == 2)
-                    # Note: We don't return here, Right Shift also triggers logic below
 
-                # --- 2. Logic for Key Down (value=1) ---
+                # --- 2. Key Down Logic ---
                 if event.value == 1:
+                    now = time.time()
 
-                    # A. Trigger Logic (Right Shift)
+                    # A. Check Idle Timeout
+                    if now - self.last_typing_time > BUFFER_IDLE_TIMEOUT:
+                        if len(self.key_buffer) > 0 and self.verbose:
+                            self.log("⏳ Buffer expired (Idle). Cleared.")
+                        self.key_buffer.clear()
+
+                    # B. Trigger (Double Shift)
                     if event.code == TRIGGER_BTN:
-                        now = time.time()
                         if now - self.last_press_time < DOUBLE_PRESS_DELAY:
-                            # Double tap detected!
-                            self.correct_last_word()
-                            self.last_press_time = 0  # Reset timer
-
-                            # Important: Clear buffer AFTER correction so we don't re-correct same thing
-                            # Or strictly speaking, we just replayed it, so the buffer is technically valid
-                            # for another layout switch?
-                            # Let's clear it to be safe and avoid infinite loops or double types.
-                            # Actually, Punto Switcher allows re-switching back.
-                            # But for v0.3.0, let's clear to keep it simple.
-                            # self.key_buffer.clear() -> No, let's keep it.
-                            # If user double taps again, they might want to switch back!
-                            # BUT: Replaying keys adds them to the OS buffer, but does it add to OUR listener?
-                            # YES, uinput events usually feed back into /dev/input if not careful.
-                            # However, we are reading from a SPECIFIC hardware device (self.dev).
-                            # UInput writes to a Virtual Device.
-                            # So our listener SHOULD NOT hear our own replayed keys.
-                            # This is perfect. We can keep the buffer.
-                            pass
-
+                            self.correct_last_phrase()
+                            self.last_press_time = 0
                         else:
                             self.last_press_time = now
 
-                    # B. Buffer Management
+                    # C. Buffer Logic
                     elif event.code in RESET_KEYS:
-                        # User finished a word or moved cursor. Start fresh.
-                        if self.verbose and len(self.key_buffer) > 0:
-                            self.log("Buffer reset (Space/Nav).")
                         self.key_buffer.clear()
-                        # Reset timer to prevent Shift + Space + Shift triggering
                         self.last_press_time = 0
+                        self.last_typing_time = now  # Update activity time
 
                     elif event.code in PRINTABLE_KEYS:
                         if event.code == e.KEY_BACKSPACE:
                             if self.key_buffer:
                                 self.key_buffer.pop()
                         else:
-                            # Append (Key, ShiftState)
                             self.key_buffer.append((event.code, self.shift_pressed))
 
-                        # Any typing invalidates the double-shift timer
-                        self.last_press_time = 0
+                        self.last_press_time = 0  # Typing breaks double-tap chain
+                        self.last_typing_time = now  # Update activity time
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="SkySwitcher v0.3.0")
+    parser = argparse.ArgumentParser(description="SkySwitcher v0.3.1")
     parser.add_argument("-d", "--device", help="Path to input device")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--list", action="store_true", help="List available devices")
@@ -253,7 +249,6 @@ if __name__ == "__main__":
             sys.exit(1)
 
     try:
-        # Note: 'langs' argument removed as we rely on system layout switching now!
         SkySwitcher(path, args.verbose).run()
     except KeyboardInterrupt:
         print("\n🛑 Stopped by user.")
