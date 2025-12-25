@@ -213,7 +213,8 @@ class SkySwitcher:
         if not full_text:
             logger.debug("⚠️ Copy failed/empty.")
             self.set_clipboard(backup_clipboard)
-            if mode == "last_word": self.send_combo(e.KEY_RIGHT)
+            if mode == "last_word":
+                self.send_combo(e.KEY_RIGHT)
             return
 
         target_text = full_text
@@ -228,7 +229,8 @@ class SkySwitcher:
 
         if target_text == converted:
             logger.debug("No change needed.")
-            if mode == "last_word": self.send_combo(e.KEY_RIGHT)
+            if mode == "last_word":
+                self.send_combo(e.KEY_RIGHT)
             return
 
         logger.info(f"Correcting: '{target_text}' -> '{converted}'")
@@ -295,7 +297,8 @@ class SkySwitcher:
                                     self.trigger_released = False
 
                     elif event.value == 1 and event.code != self.mode2_modifier:
-                        if self.last_press_time > 0: self.last_press_time = 0
+                        if self.last_press_time > 0:
+                            self.last_press_time = 0
 
         except KeyboardInterrupt:
             print("\n🛑 Stopped by user.")
