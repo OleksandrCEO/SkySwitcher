@@ -67,12 +67,12 @@ Add the input, import the module, and **apply the overlay** in your system confi
 
 ### 2. Enable in `configuration.nix`
 
-You simply need to enable the service and grant your user permission to use input devices.
+You simply need to enable the service (to install the package) and grant your user permission to use input devices.
 
     { config, pkgs, ... }:
 
     {
-      # 1. Enable SkySwitcher
+      # 1. Enable SkySwitcher package installation
       services.skyswitcher.enable = true;
 
       # 2. Grant Permissions (CRITICAL)
@@ -83,7 +83,20 @@ You simply need to enable the service and grant your user permission to use inpu
       };
     }
 
-> **Note:** After rebuilding (`sudo nixos-rebuild switch`), you might need to **reboot** or log out/in for group permissions (`uinput`) to take effect.
+> **Note:** After rebuilding (`sudo nixos-rebuild switch`), you MUST **reboot** or log out/in for group permissions (`uinput`) to take effect.
+
+---
+
+## 🤖 Autostart (KDE Plasma)
+
+Since this tool relies on the graphical session (Wayland/X11) and clipboard, the most reliable way to start it is via KDE settings.
+
+1.  Open **System Settings** (Системні параметри) -> **Autostart** (Автозапуск).
+2.  Click **+ Add New** (+ Додати нове) -> **Application...** (Програма...).
+    * *Do not select "Login Script".*
+3.  Type `skyswitcher` in the search bar and press Apply (Гаразд).
+
+That's it! SkySwitcher will now start automatically with your user session.
 
 ---
 
@@ -97,7 +110,7 @@ If you want to run it manually for debugging or development:
     # Run with verbose logging to see key events
     python3 main.py --verbose
 
-    # List available input devices
+    # List available input devices (keyboads)
     python3 main.py --list
 
 ## 📜 License
