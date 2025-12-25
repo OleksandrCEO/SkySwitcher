@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-SkySwitcher v0.2.5
+SkySwitcher v0.3.1
 A minimal Wayland/Linux layout switcher & corrector.
 
-Changes in v0.2.5:
-- FIXED: '?' artifact in translation (e.g. ',j,th' -> '?о?ер').
-  Caused by mapping collision for punctuation (',' exists in both layouts).
-- CHANGED: Implemented smart conversion direction detection based on character dominance.
-- REFACTOR: Fixed 'langs' variable initialization scope (linter warning).
-- CONFIG: Reverted default langs to "us,ua".
+Changes in v0.3.1:
+- REVERT: Removed Left Ctrl support to keep code simple (User Request).
+- FIXED: 'F12/Console' issue. Added delays and aggressive modifier release before
+  copy commands to prevent OS from detecting 'Ctrl+Shift+C'.
 
 Features:
 1. Double Tap [Right Shift]:
@@ -26,7 +24,7 @@ import argparse
 
 # --- CONFIGURATION ---
 TRIGGER_BTN = e.KEY_RIGHTSHIFT
-MODE2_MODIFIER = e.KEY_RIGHTCTRL
+MODE2_MODIFIER = e.KEY_RIGHTCTRL  # Only Right Ctrl
 
 DOUBLE_PRESS_DELAY = 0.5
 LAYOUT_SWITCH_COMBO = [e.KEY_LEFTMETA, e.KEY_SPACE]
@@ -77,28 +75,21 @@ def find_keyboard_device():
 
 class SkySwitcher:
     def __init__(self, device_path, layout_pair, verbose=False):
-        if not layout_pair:
-            self.error(f"Failed to parse layout pair: {layout_pair}")
-            sys.exit(1)
-
         self.verbose = verbose
 
         # --- Layout Setup ---
         self.src_name, self.dst_name = layout_pair
 
-        if self.src_name not in LAYOUTS_DB or self.dst_name not in LAYOUTS_DB:
+        if not layout_pair or self.src_name not in LAYOUTS_DB or self.dst_name not in LAYOUTS_DB:
             self.error(f"Unknown layouts: {layout_pair}")
             sys.exit(1)
 
         self.src_chars = LAYOUTS_DB[self.src_name]
         self.dst_chars = LAYOUTS_DB[self.dst_name]
 
-        # Create TWO separate maps to avoid collision (e.g. comma ',' existing in both)
         self.map_src_to_dst = str.maketrans(self.src_chars, self.dst_chars)
         self.map_dst_to_src = str.maketrans(self.dst_chars, self.src_chars)
 
-        # Pre-calculate unique characters for detection logic
-        # We assume punctuation overlaps, but letters don't.
         self.src_unique = set(self.src_chars) - set(self.dst_chars)
         self.dst_unique = set(self.dst_chars) - set(self.src_chars)
 
@@ -162,6 +153,10 @@ class SkySwitcher:
         time.sleep(0.02)
 
     def release_all_modifiers(self):
+        """
+        Aggressively release all modifiers to prevent 'Ghost Keys'.
+        Crucial for avoiding Ctrl+Shift+C (Inspector) issues.
+        """
         modifiers = [e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT, e.KEY_LEFTCTRL, e.KEY_RIGHTCTRL, e.KEY_LEFTALT]
         for key in modifiers:
             self.ui.write(e.EV_KEY, key, 0)
@@ -177,28 +172,29 @@ class SkySwitcher:
         return None
 
     def smart_translate(self, text):
-        """
-        Detects which layout the text likely belongs to and swaps it.
-        Fixes the collision issue where punctuation exists in both layouts.
-        """
-        # Count matches for each layout's UNIQUE characters
         src_score = sum(1 for c in text if c in self.src_unique)
         dst_score = sum(1 for c in text if c in self.dst_unique)
 
-        # If text looks like Source (e.g. English), translate TO Dest (Ukrainian)
         if src_score >= dst_score:
             return text.translate(self.map_src_to_dst)
         else:
             return text.translate(self.map_dst_to_src)
 
     def process_text_replacement(self, mode="last_word"):
+        # 1. Critical: Release physical modifiers virtually
         self.release_all_modifiers()
+
+        # 2. Wait slightly longer to ensure OS sees Shift as UP
+        # This prevents Ctrl+C becoming Ctrl+Shift+C (Inspector)
+        time.sleep(0.15)
+
         backup_clipboard = self.get_clipboard()
         self.clear_clipboard()
 
         if mode == "last_word":
             self.send_combo(e.KEY_LEFTSHIFT, e.KEY_HOME)
             self.release_all_modifiers()
+            time.sleep(0.1)
             self.send_combo(e.KEY_LEFTCTRL, e.KEY_C)
         else:
             self.send_combo(e.KEY_LEFTCTRL, e.KEY_C)
@@ -219,7 +215,6 @@ class SkySwitcher:
                 return
             target_text = full_text.split()[-1]
 
-        # Use Smart Translation
         converted = self.smart_translate(target_text)
 
         if mode == "last_word":
@@ -244,6 +239,7 @@ class SkySwitcher:
             self.send_combo(e.KEY_BACKSPACE)
 
         self.release_all_modifiers()
+        time.sleep(0.05)
         self.send_combo(e.KEY_LEFTCTRL, e.KEY_V)
 
         if mode == "last_word":
@@ -252,7 +248,7 @@ class SkySwitcher:
             self.send_combo(*LAYOUT_SWITCH_COMBO)
 
     def run(self):
-        self.log(f"🚀 SkySwitcher v0.2.5 running...")
+        self.log(f"🚀 SkySwitcher v0.2.8 running...")
 
         try:
             self.dev.grab()
@@ -262,22 +258,30 @@ class SkySwitcher:
 
         for event in self.dev.read_loop():
             if event.type == e.EV_KEY:
+                # 1. Update Modifier State
                 if event.code == MODE2_MODIFIER:
                     self.modifier_down = (event.value == 1 or event.value == 2)
 
-                if event.code == TRIGGER_BTN and event.value == 1:
-                    if self.modifier_down:
-                        self.log("✨ Mode 2: Selection Fix")
-                        self.process_text_replacement(mode="selection")
-                        self.last_press_time = 0
-                    else:
-                        now = time.time()
-                        if now - self.last_press_time < DOUBLE_PRESS_DELAY:
-                            self.log("⚡ Mode 1: Double Shift")
-                            self.process_text_replacement(mode="last_word")
+                # 2. Trigger Logic (R_SHIFT)
+                if event.code == TRIGGER_BTN:
+                    if event.value == 1:  # Key Down
+                        if self.modifier_down:
+                            self.log("✨ Mode 2: Selection Fix (Right Ctrl)")
+                            self.process_text_replacement(mode="selection")
                             self.last_press_time = 0
                         else:
-                            self.last_press_time = now
+                            now = time.time()
+                            if now - self.last_press_time < DOUBLE_PRESS_DELAY:
+                                self.log("⚡ Mode 1: Double Shift")
+                                self.process_text_replacement(mode="last_word")
+                                self.last_press_time = 0
+                            else:
+                                self.last_press_time = now
+
+                # 3. INTERRUPTION LOGIC
+                elif event.value == 1 and event.code != MODE2_MODIFIER:
+                    if self.last_press_time > 0:
+                        self.last_press_time = 0
 
 
 if __name__ == "__main__":
@@ -290,15 +294,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
     langs = None
 
-    # --- CLI Validation Section ---
     if args.list:
         list_devices()
         sys.exit(0)
 
     try:
         langs = args.langs.split(',')
-        if len(langs) != 2:
-            raise ValueError
+        if len(langs) != 2: raise ValueError
     except:
         print("❌ Error: --langs must be two codes separated by comma (e.g. 'us,ua')", file=sys.stderr)
         sys.exit(1)
