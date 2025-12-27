@@ -1,23 +1,31 @@
 # main.py
 
-# SkySwitcher v0.4.5 (Time-based Reset)
+# SkySwitcher v0.4.6 (KDE DBus Fix)
 # Features:
-# - No-Clipboard Mode (Direct key replay via uinput).
-# - Persistent Buffer: Replaying does NOT clear history (allows cycling layouts).
-# - UX Improvement: Buffer resets automatically if typing stops for > 3 seconds.
-#   (Replaces the old Enter/Esc reset logic).
+# - No-Clipboard Mode & Persistent Buffer (from v0.4.5).
+# - FIX: Replaced key-combo switching with direct System Command (DBus).
+#   This is much more reliable for KDE Plasma.
+# - Fallback: If DBus fails, tries Alt+Shift combo.
 
 import sys
 import time
 import logging
 import argparse
+import subprocess
 from evdev import InputDevice, UInput, ecodes as e, list_devices
 
 # --- Configuration ---
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 DOUBLE_PRESS_DELAY = 0.5
-TYPING_TIMEOUT = 3.0  # Seconds to wait before considering it a "new typing session"
-LAYOUT_SWITCH_COMBO = [e.KEY_LEFTMETA, e.KEY_SPACE]
+TYPING_TIMEOUT = 3.0
+
+# 🛠 KDE PLASMA SPECIFIC COMMAND
+# This tells KWin/KDE to switch layout directly.
+# Works on both X11 and Wayland sessions of KDE.
+SWITCH_COMMAND = ["qdbus", "org.kde.keyboard", "/Layouts", "nextLayout"]
+
+# Fallback keys if command fails (Common alternatives: Alt+Shift, Win+Space)
+FALLBACK_COMBO = [e.KEY_LEFTALT, e.KEY_LEFTSHIFT]
 
 
 # --- Logging Setup ---
@@ -48,7 +56,6 @@ KEY_MAP = {
 
 
 def decode_keys(key_list):
-    """Converts a list of (keycode, shift) into a string for logging."""
     result = ""
     for code, shift in key_list:
         char = KEY_MAP.get(code, '?')
@@ -119,49 +126,37 @@ class DeviceManager:
 
 
 class InputBuffer:
-    """
-    Tracks keys for replay with time-based reset logic.
-    """
-
     def __init__(self):
         self.buffer = []
-        self.last_key_time = 0  # Timestamp of the last added key
+        self.last_key_time = 0
         self.trackable_range = range(e.KEY_1, e.KEY_SLASH + 1)
 
     def add(self, keycode, is_shifted):
         now = time.time()
 
-        # --- Time-based Reset Logic ---
-        # If too much time passed since last key, we assume a new thought/sentence started.
+        # Time-based Reset
         if (now - self.last_key_time) > TYPING_TIMEOUT:
             if self.buffer:
-                # logger.debug(f"⏳ Timeout ({TYPING_TIMEOUT}s) reached. Buffer cleared.")
                 self.buffer = []
 
         self.last_key_time = now
 
-        # Handle Backspace
         if keycode == e.KEY_BACKSPACE:
             if self.buffer:
                 self.buffer.pop()
             return
 
-        # Add regular keys
         if keycode == e.KEY_SPACE or keycode in self.trackable_range:
             self.buffer.append((keycode, is_shifted))
-            if len(self.buffer) > 100:  # Safety cap
+            if len(self.buffer) > 100:
                 self.buffer.pop(0)
 
     def get_last_phrase(self):
-        if not self.buffer:
-            return []
-
+        if not self.buffer: return []
         result = []
         found_char = False
-
         for item in reversed(self.buffer):
             code, shift = item
-
             if code == e.KEY_SPACE:
                 if found_char:
                     break
@@ -170,7 +165,6 @@ class InputBuffer:
             else:
                 found_char = True
                 result.insert(0, item)
-
         return result
 
 
@@ -185,7 +179,6 @@ class SkySwitcher:
         else:
             self.device = DeviceManager.find_keyboard()
 
-        # Virtual Input Setup
         self.uinput_keys = [
             e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT, e.KEY_RIGHTCTRL, e.KEY_RIGHTSHIFT,
             e.KEY_LEFTMETA, e.KEY_LEFTALT, e.KEY_BACKSPACE, e.KEY_SPACE,
@@ -203,6 +196,22 @@ class SkySwitcher:
         self.trigger_released = True
         self.trigger_btn = e.KEY_RIGHTSHIFT
         self.shift_pressed = False
+
+    def perform_layout_switch(self):
+        """Attempts to switch layout via DBus command, then fallback keys."""
+
+        # Method 1: Try KDE DBus Command
+        try:
+            # Check if qdbus is available and run it
+            subprocess.run(SWITCH_COMMAND, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info("🔀 Switched via DBus (KDE)")
+            return
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pass  # Fallback if command fails or qdbus not found
+
+        # Method 2: Fallback to Key Combo (Alt+Shift)
+        logger.warning("⚠️ DBus failed. Trying Alt+Shift fallback...")
+        self.send_combo(*FALLBACK_COMBO)
 
     def send_combo(self, *keys):
         for k in keys:
@@ -235,11 +244,11 @@ class SkySwitcher:
         keys_to_replay = self.input_buffer.get_last_phrase()
 
         if not keys_to_replay:
-            logger.info("⚠️ Buffer empty or no word found.")
+            logger.info("⚠️ Buffer empty.")
             return
 
         readable_text = decode_keys(keys_to_replay)
-        logger.info(f"Replaying: '{readable_text}' ({len(keys_to_replay)} keys)")
+        logger.info(f"Replaying: '{readable_text}'")
 
         count = len(keys_to_replay)
         for _ in range(count):
@@ -249,13 +258,14 @@ class SkySwitcher:
             self.ui.syn()
             time.sleep(0.002)
 
-        self.send_combo(*LAYOUT_SWITCH_COMBO)
-        time.sleep(0.1)
+        # Execute Switch
+        self.perform_layout_switch()
+        time.sleep(0.15)  # Wait a bit for OS to process the switch
 
         self.replay_keys(keys_to_replay)
 
     def run(self):
-        logger.info(f"🚀 SkySwitcher v{VERSION} (No-Clipboard Mode)")
+        logger.info(f"🚀 SkySwitcher v{VERSION} (KDE/DBus Mode)")
 
         try:
             self.device.grab()
@@ -283,7 +293,6 @@ class SkySwitcher:
                                 self.last_press_time = now
                                 self.trigger_released = False
 
-                    # Buffer Logic: Only add if key is pressed (1) or repeated (2)
                     elif event.value in [1, 2]:
                         if event.code != self.trigger_btn:
                             self.input_buffer.add(event.code, self.shift_pressed)
