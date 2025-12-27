@@ -2,10 +2,15 @@
 
 # SkySwitcher v0.5.9 (fixed alt hotkey issue)
 #
-# Architecture:
-# - Keyboard Device Detection
-# - Switching Logic: Physical HotKey Emulation to bypass KDE's "Per-Window Layout" isolation.
-# - Buffer: Simple "Backspace -> Switch -> Replay" loop.
+# Architecture Overview:
+# SkySwitcher monitors physical keyboard input and performs layout switching
+# by emulating hotkeys (e.g., Meta+Space). This bypasses KDE's per-window
+# layout isolation which would otherwise prevent system-wide switching.
+#
+# Components:
+# - DeviceManager: Auto-detects keyboard devices
+# - InputBuffer: Tracks typed characters for replay after layout switch
+# - SkySwitcher: Main event loop and correction logic
 
 import sys
 import time
@@ -13,10 +18,18 @@ import logging
 import argparse
 from evdev import InputDevice, UInput, ecodes as e, list_devices
 
-# Fixed configurations
-VERSION = "0.5.3"
-DOUBLE_PRESS_DELAY = 0.5
-TYPING_TIMEOUT = 3.0
+# Configuration constants
+VERSION = "0.5.9"
+DOUBLE_PRESS_DELAY = 0.5  # seconds - max interval between double-press
+TYPING_TIMEOUT = 3.0      # seconds - buffer reset after inactivity
+MAX_BUFFER_SIZE = 100     # maximum tracked keystrokes
+
+# Hardware timing delays (tuned for stability)
+HOTKEY_PRESS_DURATION = 0.05      # Hold duration for combo recognition
+LAYOUT_SWITCH_SETTLE_TIME = 0.15  # Wait for layout change to complete
+KEY_REPLAY_DELAY = 0.005          # Delay between replayed keystrokes
+BACKSPACE_DELAY = 0.002           # Delay between backspace events
+MODIFIER_RESET_DELAY = 0.05       # OS state update time
 
 # Predefined switching styles
 HOTKEY_STYLES = {
@@ -55,7 +68,15 @@ KEY_MAP = {
 }
 
 
-def decode_keys(key_list):
+def decode_keys(key_list: list[tuple[int, bool]]) -> str:
+    """Decode key sequence to human-readable string.
+
+    Args:
+        key_list: List of (keycode, shift_pressed) tuples
+
+    Returns:
+        Human-readable string representation of the key sequence
+    """
     result = ""
     for code, shift in key_list:
         char = KEY_MAP.get(code, '?')
@@ -92,12 +113,18 @@ class DeviceManager:
 
     @staticmethod
     def find_keyboard() -> InputDevice:
-        paths = []  # important for IDE linting
+        """Auto-detect keyboard device from available input devices.
 
+        Returns:
+            InputDevice object for the detected keyboard
+
+        Raises:
+            SystemExit: If no keyboard is found or device access fails
+        """
         try:
             paths = list_devices()
-        except OSError:
-            logger.error("❌ Failed to access input devices (Permission denied?).")
+        except OSError as e:
+            logger.error(f"Failed to access input devices: {e}")
             sys.exit(1)
 
         possible_candidates = []
@@ -138,7 +165,13 @@ class InputBuffer:
         self.last_key_time = 0
         self.trackable_range = range(e.KEY_1, e.KEY_SLASH + 1)
 
-    def add(self, keycode, is_shifted):
+    def add(self, keycode: int, is_shifted: bool) -> None:
+        """Add a keystroke to the buffer.
+
+        Args:
+            keycode: evdev key code
+            is_shifted: Whether shift was pressed during keystroke
+        """
         now = time.time()
         if (now - self.last_key_time) > TYPING_TIMEOUT:
             if self.buffer:
@@ -152,41 +185,62 @@ class InputBuffer:
 
         if keycode == e.KEY_SPACE or keycode in self.trackable_range:
             self.buffer.append((keycode, is_shifted))
-            if len(self.buffer) > 100:
+            if len(self.buffer) > MAX_BUFFER_SIZE:
                 self.buffer.pop(0)
 
-    def get_last_phrase(self):
-        if not self.buffer: return []
+    def get_last_phrase(self) -> list[tuple[int, bool]]:
+        """Extract the last typed phrase from buffer.
+
+        Returns a list of (keycode, shift_pressed) tuples representing
+        the most recent word, including any leading spaces.
+
+        Returns:
+            List of key tuples, or empty list if buffer is empty
+        """
+        if not self.buffer:
+            return []
+
         result = []
         found_char = False
+
         for item in reversed(self.buffer):
             code, shift = item
             if code == e.KEY_SPACE:
                 if found_char:
-                    break
+                    break  # Stop at first space after finding characters
                 else:
-                    result.insert(0, item)
+                    result.insert(0, item)  # Include leading spaces
             else:
                 found_char = True
                 result.insert(0, item)
+
         return result
 
 
 # --- Main Application ---
 class SkySwitcher:
     def __init__(self, device_path=None, switch_keys=None):
-        # Default to Meta+Space if nothing passed (though argparse handles defaults)
+        """Initialize SkySwitcher with input/output devices and state.
+
+        Args:
+            device_path: Optional path to input device, auto-detects if None
+            switch_keys: Optional list of key codes for layout switching hotkey
+        """
+        # Default to Meta+Space if nothing passed
         self.switch_keys = switch_keys if switch_keys else HOTKEY_STYLES['meta']
 
+        # Initialize input device
         if device_path:
             try:
                 self.device = InputDevice(device_path)
-                logger.info(f"✅ Manual Device: {self.device.name}")
-            except OSError:
+                logger.info(f"Manual device: {self.device.name}")
+            except OSError as err:
+                logger.error(f"Failed to open device {device_path}: {err}")
                 sys.exit(1)
         else:
             self.device = DeviceManager.find_keyboard()
 
+        # Define virtual keyboard capabilities
         self.uinput_keys = [
             e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT, e.KEY_RIGHTCTRL, e.KEY_RIGHTSHIFT,
             e.KEY_LEFTMETA, e.KEY_LEFTALT, e.KEY_BACKSPACE, e.KEY_SPACE,
@@ -194,53 +248,59 @@ class SkySwitcher:
             *range(e.KEY_ESC, e.KEY_MICMUTE)
         ]
 
+        # Create virtual output device
         try:
             self.ui = UInput({e.EV_KEY: self.uinput_keys}, name="SkySwitcher-Virtual")
-        except OSError:
-            logger.error("❌ Failed to create UInput.")
+        except OSError as err:
+            logger.error(f"Failed to create UInput device: {err}")
             sys.exit(1)
 
+        # Initialize buffer and state
         self.input_buffer = InputBuffer()
-
         self.last_press_time = 0
         self.trigger_released = True
         self.trigger_btn = e.KEY_RIGHTSHIFT
         self.shift_pressed = False
         self.pending_action = False
 
-    def perform_layout_switch(self):
+    def perform_layout_switch(self) -> None:
+        """Switch keyboard layout using configured hotkey combination.
+
+        Prevents unintended menu activation (e.g., Alt menu in KDE) by
+        releasing modifier keys before trigger keys.
+
+        Strategy: Release Modifier (Alt) BEFORE releasing Trigger (Shift).
+        Example: [Alt, Shift] -> Release Alt first -> State becomes Shift (Safe!)
+        If we release Shift first -> State becomes Alt -> Release Alt -> Menu triggers.
         """
-        Switches layout preventing 'Alt Menu' trigger.
-        Strategy: Release Modifier (Alt) BEFORE releasing the Trigger (Shift).
-        """
-        logger.info(f"🔀 Switching Layout...")
+        logger.info("🔀 Switching Layout...")
 
         if not self.switch_keys:
             return
 
-        # --- PRESS PHASE ---
-        # Press all keys (Simultaneous press is fine/better for input systems)
+        # Press all keys (simultaneous press for better input system recognition)
         for k in self.switch_keys:
             self.ui.write(e.EV_KEY, k, 1)
         self.ui.syn()
 
         # Hold to register the combo
-        time.sleep(0.05)
+        time.sleep(HOTKEY_PRESS_DURATION)
 
-        # --- RELEASE PHASE (The Fix) ---
-        # DO NOT use reversed() here.
-        # We must release keys in the SAME order (or specifically Modifier first).
-        # Example: [Alt, Shift] -> Release Alt first -> State becomes Shift (Safe!)
-        # If we release Shift first -> State becomes Alt -> Release Alt -> Menu triggers.
-
+        # Release keys in same order (modifier first to prevent menu trigger)
+        # DO NOT use reversed() here
         for k in self.switch_keys:
             self.ui.write(e.EV_KEY, k, 0)
         self.ui.syn()
 
-        # Stabilize
-        time.sleep(0.15)
+        # Allow layout to stabilize
+        time.sleep(LAYOUT_SWITCH_SETTLE_TIME)
 
-    def replay_keys(self, key_sequence):
+    def replay_keys(self, key_sequence) -> None:
+        """Replay a sequence of keystrokes with proper shift handling.
+
+        Args:
+            key_sequence: List of (keycode, shift_pressed) tuples to replay
+        """
         for code, use_shift in key_sequence:
             if use_shift:
                 self.ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1)
@@ -252,11 +312,14 @@ class SkySwitcher:
             if use_shift:
                 self.ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)
                 self.ui.syn()
-            time.sleep(0.005)
+            time.sleep(KEY_REPLAY_DELAY)
 
-    def reset_modifiers(self):
-        """Force release all modifiers cleanly."""
-        # Список розширено, щоб точно вбити все, що може залипнути
+    def reset_modifiers(self) -> None:
+        """Force release all modifier keys to prevent stuck key states.
+
+        Extended modifier list ensures clean state reset for all possible
+        modifier keys that might interfere with subsequent operations.
+        """
         modifiers = [
             e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT,
             e.KEY_LEFTCTRL, e.KEY_RIGHTCTRL,
@@ -264,44 +327,63 @@ class SkySwitcher:
             e.KEY_LEFTMETA, e.KEY_RIGHTMETA
         ]
 
-        # 1. Release all modifiers
+        # Release all modifiers
         for key in modifiers:
             self.ui.write(e.EV_KEY, key, 0)
         self.ui.syn()
 
-        # 2. Critical Wait: Give OS time to update state before we type Backspace
-        time.sleep(0.05)
+        # Allow OS time to update keyboard state before sending backspace
+        time.sleep(MODIFIER_RESET_DELAY)
 
-    def fix_last_word(self):
+    def fix_last_word(self) -> None:
+        """Correct the last typed phrase by switching layout.
+
+        Process:
+        1. Release all modifier keys to prevent interference
+        2. Delete last phrase using backspace
+        3. Switch keyboard layout
+        4. Replay the phrase in new layout
+        """
         keys_to_replay = self.input_buffer.get_last_phrase()
         if not keys_to_replay:
             logger.info("⚠️ Buffer empty.")
             return
 
-        # 1. Release Virtual Modifiers
+        # Release virtual modifiers
         self.reset_modifiers()
 
         readable_text = decode_keys(keys_to_replay)
         logger.info(f"🔄 Correcting: '{readable_text}'")
 
-        # 2. Delete
+        # Delete the phrase
         for _ in range(len(keys_to_replay)):
             self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 1)
             self.ui.syn()
             self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 0)
             self.ui.syn()
-            time.sleep(0.002)
+            time.sleep(BACKSPACE_DELAY)
 
-        # 3. Switch (Physical)
+        # Switch layout
         self.perform_layout_switch()
 
-        # 4. Replay
+        # Replay in new layout
         self.replay_keys(keys_to_replay)
 
-    def run(self):
+    def run(self) -> None:
+        """Main event loop for keyboard monitoring and correction.
+
+        Monitors keyboard input events and triggers layout correction on
+        double-press of the trigger key (Right Shift by default).
+
+        The loop handles:
+        - Shift key state tracking for proper case handling
+        - Double-press detection with configurable delay
+        - Keystroke buffering for correction replay
+        - Graceful shutdown on Ctrl+C
+        """
         logger.info(f"🚀 SkySwitcher v{VERSION}")
 
-        # Grab check
+        # Test device grab capability
         try:
             self.device.grab()
             self.device.ungrab()
@@ -311,14 +393,14 @@ class SkySwitcher:
         try:
             for event in self.device.read_loop():
                 if event.type == e.EV_KEY:
-                    # Tracking Shift state for typing (upper/lower case)
+                    # Track Shift state for proper case handling
                     if event.code in [e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT]:
                         self.shift_pressed = (event.value == 1 or event.value == 2)
 
-                    # --- LOGIC START ---
+                    # Handle trigger key (Right Shift)
                     if event.code == self.trigger_btn:
 
-                        # === PRESS (value 1) ===
+                        # Key press
                         if event.value == 1:
                             now = time.time()
                             if (now - self.last_press_time < DOUBLE_PRESS_DELAY) and self.trigger_released:
@@ -330,21 +412,21 @@ class SkySwitcher:
 
                             self.trigger_released = False
 
-                        # === RELEASE (value 0) ===
+                        # Key release
                         elif event.value == 0:
                             self.trigger_released = True
 
-                            # Double Press detected
+                            # Execute correction on double-press
                             if self.pending_action:
                                 logger.info("✨ Trigger confirmed (on release)")
                                 self.fix_last_word()
                                 self.pending_action = False
 
-                    # Tracking other keys
+                    # Track other keys in buffer
                     elif event.value in [1, 2]:
                         if event.code != self.trigger_btn:
                             self.input_buffer.add(event.code, self.shift_pressed)
-                        # Single Press detected
+                        # Cancel pending action if other key pressed
                         if self.last_press_time > 0:
                             self.last_press_time = 0
 
