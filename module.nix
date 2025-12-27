@@ -10,14 +10,11 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # [cite_start]1. Додаємо пакет у систему (щоб команда 'skyswitcher' була доступна всюди) [cite: 11]
     environment.systemPackages = [
       pkgs.skyswitcher
-      pkgs.wl-clipboard
     ];
 
-    # [cite_start]2. Налаштовуємо права доступу до uinput та створюємо групи [cite: 13]
-    # Це дозволить скрипту працювати без sudo
+    # Enable uinput device access for keyboard input emulation
     hardware.uinput.enable = true;
   };
 }

@@ -33,7 +33,7 @@ MODIFIER_RESET_DELAY = 0.05       # OS state update time
 
 # Predefined switching styles
 HOTKEY_STYLES = {
-    "alt":  [e.KEY_LEFTALT, e.KEY_LEFTSHIFT],
+    "alt": [e.KEY_LEFTALT, e.KEY_LEFTSHIFT],
     "meta": [e.KEY_LEFTMETA, e.KEY_SPACE],  # Default
     "caps": [e.KEY_CAPSLOCK],
     "ctrl": [e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT],
