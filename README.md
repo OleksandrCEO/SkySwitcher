@@ -11,15 +11,11 @@ Designed with **NixOS Flakes** in mind for reproducible and secure deployment.
 ## ✨ Features
 
 * **⚡ Double Right Shift:** Tap `Right Shift` twice to switch layout (e.g., English ↔ Ukrainian).
-* **🖋️ Auto-Correction:** It automatically corrects the **last typed phrase** when you switch.
-* **🔒 Secure:** Runs with dynamic permissions (via Udev ACLs), no manual group configuration required.
+* **📝 Auto-Correction:** It automatically corrects the **last typed word** when you switch.
+    * *Typed `ghbdsn`? -> Double Shift -> Becomes `привіт`.*
+* **🎯 Selection Fix:** Hold `Right Ctrl` + press `Right Shift` to fix the currently **selected text**.
+* **🔒 Secure:** Runs with standard user permissions (via `uinput` group), no `sudo` required after setup.
 * **❄️ Pure Nix:** Zero global dependencies. Builds cleanly from the Nix Store.
-
-
-## 📝 Clipboard Version
-
-Old version with clipboard dependency and extra features (like handling selected text) available in extra branch: [feature-clipboard](https://github.com/OleksandrCEO/SkySwitcher/tree/feature-clipboard)
-
 
 ## 🎮 Controls
 
@@ -27,7 +23,6 @@ Old version with clipboard dependency and extra features (like handling selected
 | :--- | :--- | :--- |
 | **Fix Last Word** | `Right Shift` (x2) | Selects last word, translates it, replaces text, and switches system layout. |
 | **Fix Selection** | `R-Ctrl` + `R-Shift` | Converts the currently selected text (clipboard-based). |
-
 
 ---
 
@@ -42,10 +37,10 @@ Add the input, import the module, and **apply the overlay** in your system confi
     {
       inputs = {
         nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
-        
+
         # Add SkySwitcher input
         skyswitcher.url = "github:OleksandrCEO/SkySwitcher";
-        # skyswitcher.inputs.nixpkgs.follows = "nixpkgs"; 
+        # skyswitcher.inputs.nixpkgs.follows = "nixpkgs";
       };
 
       outputs = { self, nixpkgs, skyswitcher, ... }: {
@@ -53,7 +48,7 @@ Add the input, import the module, and **apply the overlay** in your system confi
           system = "x86_64-linux";
           modules = [
             ./configuration.nix
-            
+
             # 1. Import the module
             skyswitcher.nixosModules.default
 
@@ -72,77 +67,34 @@ Add the input, import the module, and **apply the overlay** in your system confi
 
 ### 2. Enable in `configuration.nix`
 
+You simply need to enable the service (to install the package) and grant your user permission to use input devices.
+
     { config, pkgs, ... }:
 
     {
-      # Enable SkySwitcher
+      # 1. Enable SkySwitcher package installation
       services.skyswitcher.enable = true;
+
+      # 2. Grant Permissions (CRITICAL)
+      # The user needs to be in 'input' (to read keys) and 'uinput' (to write keys).
+      users.users.your_username = {
+        isNormalUser = true;
+        extraGroups = [ "wheel" "input" "uinput" ];
+      };
     }
 
-> **Note:** With the new udev-based approach, users **do not need** to be added to `input` or `uinput` groups. Permissions are granted dynamically to the active graphical session user.
-
-### 3. Update SkySwitcher (when script updates but Nix flake hasn't)
-
-If you've made local changes or want to pull the latest version:
-
-    cd /etc/nixos
-    sudo nix flake update skyswitcher
-    sudo nixos-rebuild switch
-
-If you track your NixOS config in git:
-
-    cd /etc/nixos
-    sudo git add .
-    sudo git commit -m "Update SkySwitcher to latest version"
-    sudo nixos-rebuild switch
-
----
-
-## 🐧 Installation (Ubuntu / Fedora / Arch)
-
-For non-NixOS systems, use the provided installer script:
-
-### Quick Install
-
-    # Download the latest release
-    wget https://github.com/OleksandrCEO/SkySwitcher/archive/refs/heads/master.zip
-    unzip master.zip
-    cd SkySwitcher-master
-
-    # Run installer (requires root)
-    sudo ./install.sh
-
-The installer will:
-1. Install `python3-evdev` via your package manager (apt/dnf/pacman)
-2. Copy `main.py` to `/usr/local/bin/skyswitcher`
-3. Create udev rules for dynamic device permissions
-4. Reload udev to apply changes
-
-### Update
-
-To update to the latest version, simply download and run the installer again:
-
-    wget https://github.com/OleksandrCEO/SkySwitcher/archive/refs/heads/master.zip
-    unzip -o master.zip
-    cd SkySwitcher-master
-    sudo ./install.sh
+> **Note:** After rebuilding (`sudo nixos-rebuild switch`), you MUST **reboot** or log out/in for group permissions (`uinput`) to take effect.
 
 ---
 
 ## 🤖 Autostart (KDE Plasma)
 
-Since this tool relies on the graphical session (Wayland/X11), the most reliable way to start it is via KDE settings.
+Since this tool relies on the graphical session (Wayland/X11) and clipboard, the most reliable way to start it is via KDE settings.
 
 1.  Open **System Settings** (Системні параметри) -> **Autostart** (Автозапуск).
 2.  Click **+ Add New** (+ Додати нове) -> **Application...** (Програма...).
     * *Do not select "Login Script".*
-3.  Type `skyswitcher` in the search bar and select it.
-4.  *(Optional)* If you want to use a different layout switching hotkey, click on the added entry, then click **Properties** and modify the command:
-    * For Alt+Shift: `skyswitcher -k alt`
-    * For Ctrl+Shift: `skyswitcher -k ctrl`
-    * For CapsLock: `skyswitcher -k caps`
-    * Default is Meta+Space (`-k meta`)
-5.  Click Apply (Гаразд).
+3.  Type `skyswitcher` in the search bar and press Apply (Гаразд).
 
 That's it! SkySwitcher will now start automatically with your user session.
 
@@ -158,20 +110,8 @@ If you want to run it manually for debugging or development:
     # Run with verbose logging to see key events
     python3 main.py --verbose
 
-    # List available input devices (keyboards)
+    # List available input devices (keyboads)
     python3 main.py --list
-
-    # Use a different layout switching hotkey
-    python3 main.py -k alt    # Alt+Shift (default in many Linux DEs)
-    python3 main.py -k meta   # Meta+Space (default, KDE-style)
-    python3 main.py -k ctrl   # Ctrl+Shift
-    python3 main.py -k caps   # CapsLock
-
-Available hotkey styles:
-- `alt` - Left Alt + Left Shift (common on GNOME/XFCE)
-- `meta` - Left Meta (Windows key) + Space (default, KDE standard)
-- `ctrl` - Left Ctrl + Left Shift
-- `caps` - CapsLock only
 
 ## 📜 License
 
