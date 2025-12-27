@@ -11,7 +11,7 @@ Designed with **NixOS Flakes** in mind for reproducible and secure deployment.
 ## ✨ Features
 
 * **⚡ Double Right Shift:** Tap `Right Shift` twice to switch layout (e.g., English ↔ Ukrainian).
-* **🖋️ Auto-Correction:** It automatically corrects the **last typed phrase** when you switch. Typed `ghbdsn`? -> Double Shift -> Becomes `привіт`.
+* **🖋️ Auto-Correction:** It automatically corrects the **last typed phrase** when you switch.
 * **🔒 Secure:** Runs with standard user permissions (via `uinput` group), no `sudo` required after setup.
 * **❄️ Pure Nix:** Zero global dependencies. Builds cleanly from the Nix Store.
 

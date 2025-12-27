@@ -1,20 +1,20 @@
 # main.py
 
-# SkySwitcher v0.4.2 (Fixed spacing bug)
-# Merged functionality:
-# - Core Logic: Robust v0.3.8 architecture (Reliable clipboard, no sudo hacks).
-# - CLI Features: Restored v0.2.1 arguments (--list, --device, --verbose).
-# - Fix v0.4.2: Handles trailing spaces correctly (treats space as a normal symbol).
+# SkySwitcher v0.4.3 (No-Clipboard Edition)
+# Evolution:
+# - Removed: wl-clipboard dependency, TextProcessor, Selection Mode.
+# - Added: InputBuffer to track physical keystrokes.
+# - Strategy: "Replay" logic. Instead of translating text, we simply
+#   delete the wrong keystrokes, switch layout, and re-type them.
 
 import sys
 import time
 import logging
-import subprocess
 import argparse
 from evdev import InputDevice, UInput, ecodes as e, list_devices
 
 # --- Configuration ---
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 DOUBLE_PRESS_DELAY = 0.5
 LAYOUT_SWITCH_COMBO = [e.KEY_LEFTMETA, e.KEY_SPACE]
 
@@ -30,36 +30,24 @@ handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(EmojiFormatter())
 logger = logging.getLogger("SkySwitcher")
 logger.addHandler(handler)
-# Note: Level is set in __main__ based on arguments
-
-# --- Layout Database ---
-# Added space at the end of both layouts to treat it as a normal symbol
-LAYOUT_US = "`qwertyuiop[]\\asdfghjkl;'zxcvbnm,./~@#$%^&QWERTYUIOP{}|ASDFGHJKL:\"ZXCVBNM<>? "
-LAYOUT_UA = "'йцукенгшщзхїґфівапролджєячсмитьбю.₴\"№;%:?ЙЦУКЕНГШЩЗХЇҐФІВАПРОЛДЖЄЯЧСМИТЬБЮ, "
-LAYOUTS_DB = {
-    'us': LAYOUT_US,
-    'ua': LAYOUT_UA,
-}
 
 
 class DeviceManager:
     IGNORED_KEYWORDS = [
         'mouse', 'webcam', 'audio', 'video', 'consumer',
         'control', 'headset', 'receiver', 'solaar', 'hotkeys',
-        'button', 'switch', 'hda', 'dock'
+        'button', 'switch', 'hda', 'dock', 'deck', 'touchpad'
     ]
     REQUIRED_KEYS = {e.KEY_SPACE, e.KEY_ENTER, e.KEY_A, e.KEY_Z}
 
     @staticmethod
     def list_available():
-        """Prints all available input devices for debugging."""
         devices = []
         try:
             devices = [InputDevice(path) for path in list_devices()]
         except OSError:
-            print("❌ Failed to list devices. Check permissions.", file=sys.stderr)
+            print("❌ Failed to list devices.", file=sys.stderr)
             return
-
         devices.sort(key=lambda x: x.path)
         print(f"{'PATH':<20} | {'NAME'}")
         print("-" * 60)
@@ -72,8 +60,7 @@ class DeviceManager:
         try:
             devices = [InputDevice(path) for path in list_devices()]
         except OSError:
-            logger.error(
-                "❌ Failed to list devices. Do you have permission? (Try adding user to 'input' group or use sudo)")
+            logger.error("❌ Failed to list devices. Check permissions.")
             sys.exit(1)
 
         devices.sort(key=lambda x: x.path)
@@ -83,10 +70,8 @@ class DeviceManager:
             name_lower = dev.name.lower()
             if any(bad in name_lower for bad in DeviceManager.IGNORED_KEYWORDS):
                 continue
-
             if e.EV_KEY not in dev.capabilities():
                 continue
-
             supported_keys = set(dev.capabilities()[e.EV_KEY])
             if DeviceManager.REQUIRED_KEYS.issubset(supported_keys):
                 if 'keyboard' in name_lower or 'kbd' in name_lower:
@@ -98,37 +83,88 @@ class DeviceManager:
             logger.info(f"✅ Auto-detected (best guess): {possible_candidates[0].name}")
             return possible_candidates[0]
 
-        logger.error("❌ No suitable keyboard found! Use --list to find it manually.")
+        logger.error("❌ No keyboard found. Use --list.")
         sys.exit(1)
 
 
-class TextProcessor:
-    def __init__(self):
-        self.src_chars = LAYOUTS_DB['us']
-        self.dst_chars = LAYOUTS_DB['ua']
-        self.map_src_to_dst = str.maketrans(self.src_chars, self.dst_chars)
-        self.map_dst_to_src = str.maketrans(self.dst_chars, self.src_chars)
-        self.src_unique = set(self.src_chars) - set(self.dst_chars)
-        self.dst_unique = set(self.dst_chars) - set(self.src_chars)
-        logger.info("🌍 Languages: US <-> UA")
+class InputBuffer:
+    """
+    Tracks the history of typed keys to allow 'replay' on a different layout.
+    Stores tuples: (keycode, is_shifted)
+    """
 
-    def smart_translate(self, text):
-        src_score = sum(1 for c in text if c in self.src_unique)
-        dst_score = sum(1 for c in text if c in self.dst_unique)
-        if src_score >= dst_score:
-            return text.translate(self.map_src_to_dst)
-        return text.translate(self.map_dst_to_src)
+    def __init__(self):
+        self.buffer = []
+        # Keys that reset the buffer (safety mechanism)
+        self.reset_keys = {
+            e.KEY_ENTER, e.KEY_ESC, e.KEY_TAB,
+            e.KEY_UP, e.KEY_DOWN, e.KEY_LEFT, e.KEY_RIGHT,
+            e.KEY_HOME, e.KEY_END, e.KEY_PAGEUP, e.KEY_PAGEDOWN
+        }
+        # Keys that we want to track for replay (letters, numbers, punctuation, space)
+        # We define a range or logic check in the `add` method, but here are explicit ones:
+        self.trackable_range = range(e.KEY_1, e.KEY_SLASH + 1)  # Covers most main block keys
+
+    def add(self, keycode, is_shifted):
+        # If it's a "Reset" key (like Enter or Arrows), clear history
+        if keycode in self.reset_keys:
+            self.clear()
+            return
+
+        # If Backspace, remove last item
+        if keycode == e.KEY_BACKSPACE:
+            if self.buffer:
+                self.buffer.pop()
+            return
+
+        # If it's a standard typing key, add to buffer
+        if keycode == e.KEY_SPACE or keycode in self.trackable_range:
+            self.buffer.append((keycode, is_shifted))
+            # Limit buffer size to prevent memory issues (though unlikely)
+            if len(self.buffer) > 100:
+                self.buffer.pop(0)
+
+    def clear(self):
+        self.buffer = []
+
+    def get_last_phrase(self):
+        """
+        Returns the keys for the last 'word' plus any trailing spaces.
+        Example: [k_H, k_I, k_SPACE, k_T, k_H, k_E, k_R, k_E, k_SPACE, k_SPACE]
+        Returns: [k_T, k_H, k_E, k_R, k_E, k_SPACE, k_SPACE]
+        """
+        if not self.buffer:
+            return []
+
+        # Iterate backwards
+        result = []
+        found_char = False
+
+        for item in reversed(self.buffer):
+            code, shift = item
+
+            if code == e.KEY_SPACE:
+                if found_char:
+                    # We found a space AFTER finding characters -> Word boundary
+                    break
+                else:
+                    # We are in trailing spaces
+                    result.insert(0, item)
+            else:
+                # Normal character
+                found_char = True
+                result.insert(0, item)
+
+        return result
 
 
 class SkySwitcher:
     def __init__(self, device_path=None):
-        # Device Selection Logic
         if device_path:
             try:
                 self.device = InputDevice(device_path)
                 logger.info(f"✅ Manual Device: {self.device.name}")
-            except OSError as err:
-                logger.error(f"❌ Failed to open {device_path}: {err}")
+            except OSError:
                 sys.exit(1)
         else:
             self.device = DeviceManager.find_keyboard()
@@ -136,146 +172,84 @@ class SkySwitcher:
         # Virtual Input Setup
         self.uinput_keys = [
             e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT, e.KEY_RIGHTCTRL, e.KEY_RIGHTSHIFT,
-            e.KEY_C, e.KEY_V, e.KEY_LEFT, e.KEY_RIGHT, e.KEY_BACKSPACE,
-            e.KEY_HOME, e.KEY_LEFTMETA, e.KEY_SPACE, e.KEY_LEFTALT
+            e.KEY_LEFTMETA, e.KEY_LEFTALT, e.KEY_BACKSPACE, e.KEY_SPACE,
+            # Add all standard keys to UInput capability
+            *range(e.KEY_ESC, e.KEY_MICMUTE)
         ]
 
-        self.ui = None
         try:
             self.ui = UInput({e.EV_KEY: self.uinput_keys}, name="SkySwitcher-Virtual")
         except OSError:
-            logger.error("❌ Failed to create UInput device. Check permissions for /dev/uinput.")
+            logger.error("❌ Failed to create UInput.")
             sys.exit(1)
 
-        self.processor = TextProcessor()
+        self.input_buffer = InputBuffer()
         self.last_press_time = 0
-        self.modifier_down = False
-
-        # New flag to track if trigger was physically released
         self.trigger_released = True
-
         self.trigger_btn = e.KEY_RIGHTSHIFT
-        self.mode2_modifier = e.KEY_RIGHTCTRL
+
+        # Modifier tracking
+        self.shift_pressed = False
 
     def send_combo(self, *keys):
         for k in keys:
             self.ui.write(e.EV_KEY, k, 1)
-
         self.ui.syn()
         time.sleep(0.02)
-
         for k in reversed(keys):
             self.ui.write(e.EV_KEY, k, 0)
-
         self.ui.syn()
         time.sleep(0.02)
 
-    def release_all_modifiers(self):
-        modifiers = [e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT, e.KEY_LEFTCTRL, e.KEY_RIGHTCTRL, e.KEY_LEFTALT]
-        for key in modifiers:
-            self.ui.write(e.EV_KEY, key, 0)
-        self.ui.syn()
-        time.sleep(0.05)
+    def replay_keys(self, key_sequence):
+        """Re-types the keys from the buffer."""
+        for code, use_shift in key_sequence:
+            if use_shift:
+                self.ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1)
+                self.ui.syn()
 
-    def get_clipboard(self):
-        try:
-            return subprocess.run(['wl-paste', '-n'], capture_output=True, text=True).stdout
-        except Exception:
-            return ""
+            self.ui.write(e.EV_KEY, code, 1)
+            self.ui.syn()
+            self.ui.write(e.EV_KEY, code, 0)
+            self.ui.syn()
 
-    def set_clipboard(self, text):
-        try:
-            p = subprocess.Popen(['wl-copy', '-n'], stdin=subprocess.PIPE, text=True)
-            p.communicate(input=text)
-        except Exception:
-            pass
+            if use_shift:
+                self.ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)
+                self.ui.syn()
 
-    def wait_for_new_content(self, timeout=0.5):
-        start = time.time()
-        while time.time() - start < timeout:
-            content = self.get_clipboard()
-            if content:
-                return content
-            time.sleep(0.02)
-        return None
+            time.sleep(0.005)  # Tiny delay for stability
 
-    def process_correction(self, mode="last_word"):
-        self.release_all_modifiers()
-        time.sleep(0.15)
+    def fix_last_word(self):
+        # 1. Get keys to fix
+        keys_to_replay = self.input_buffer.get_last_phrase()
 
-        backup_clipboard = self.get_clipboard()
-        subprocess.run(['wl-copy', '--clear'], check=False)
-
-        if mode == "last_word":
-            self.send_combo(e.KEY_LEFTSHIFT, e.KEY_HOME)
-            self.release_all_modifiers()
-            time.sleep(0.1)
-            self.send_combo(e.KEY_LEFTCTRL, e.KEY_C)
-        else:
-            self.send_combo(e.KEY_LEFTCTRL, e.KEY_C)
-
-        full_text = self.wait_for_new_content()
-
-        if not full_text:
-            logger.debug("⚠️ Copy failed/empty.")
-            self.set_clipboard(backup_clipboard)
-            if mode == "last_word":
-                self.send_combo(e.KEY_RIGHT)
+        if not keys_to_replay:
+            logger.info("⚠️ Buffer empty or no word found.")
             return
 
-        target_text = full_text
-        trailing_spaces_count = 0
+        count = len(keys_to_replay)
+        logger.info(f"🔄 Replaying {count} keys on new layout...")
 
-        if mode == "last_word":
-            if not full_text.strip():
-                self.set_clipboard(backup_clipboard)
-                self.send_combo(e.KEY_RIGHT)
-                return
+        # 2. Delete current wrong text (Backspace x Count)
+        for _ in range(count):
+            self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 1)
+            self.ui.syn()
+            self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 0)
+            self.ui.syn()
+            time.sleep(0.002)
 
-            # Logic update: Handle trailing spaces correctly
-            full_text_stripped = full_text.rstrip()
-            trailing_spaces_count = len(full_text) - len(full_text_stripped)
-            target_text = full_text_stripped.split()[-1]
+        # 3. Switch Layout
+        self.send_combo(*LAYOUT_SWITCH_COMBO)
+        time.sleep(0.1)  # Wait for OS to switch
 
-        converted = self.processor.smart_translate(target_text)
+        # 4. Replay keys (OS will map them to new layout)
+        self.replay_keys(keys_to_replay)
 
-        if target_text == converted:
-            logger.debug("No change needed.")
-            if mode == "last_word":
-                self.send_combo(e.KEY_RIGHT)
-            return
-
-        # Restore trailing spaces to the converted text
-        final_text = converted + (" " * trailing_spaces_count)
-
-        logger.info(f"Correcting: '{target_text}' -> '{converted}' (spaces: {trailing_spaces_count})")
-        self.set_clipboard(final_text)
-        time.sleep(0.1)
-
-        if mode == "last_word":
-            self.send_combo(e.KEY_RIGHT)
-            # Delete word length AND trailing spaces
-            total_backspaces = len(target_text) + trailing_spaces_count
-            for _ in range(total_backspaces):
-                self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 1)
-                self.ui.syn()
-                time.sleep(0.005)
-                self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 0)
-                self.ui.syn()
-        else:
-            self.send_combo(e.KEY_BACKSPACE)
-
-        self.release_all_modifiers()
-        time.sleep(0.05)
-        self.send_combo(e.KEY_LEFTCTRL, e.KEY_V)
-
-        if mode == "last_word":
-            logger.info("Switching system layout...")
-            time.sleep(0.1)
-            self.send_combo(*LAYOUT_SWITCH_COMBO)
+        # 5. Clear buffer so we don't double-fix
+        self.input_buffer.clear()
 
     def run(self):
-        logger.info(f"🚀 SkySwitcher v{VERSION} running...")
+        logger.info(f"🚀 SkySwitcher v{VERSION} (No-Clipboard Mode)")
 
         try:
             self.device.grab()
@@ -287,33 +261,32 @@ class SkySwitcher:
             for event in self.device.read_loop():
                 if event.type == e.EV_KEY:
 
-                    if event.code == self.mode2_modifier:
-                        self.modifier_down = (event.value == 1 or event.value == 2)
+                    # Track Modifier State (Shift)
+                    if event.code in [e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT]:
+                        self.shift_pressed = (event.value == 1 or event.value == 2)
 
+                    # Trigger Logic (Right Shift)
                     if event.code == self.trigger_btn:
-                        # Handle Release event to validate double-press
                         if event.value == 0:
                             self.trigger_released = True
-
                         elif event.value == 1:
-                            if self.modifier_down:
-                                logger.info("✨ Mode 2: Selection Fix")
-                                self.process_correction(mode="selection")
+                            now = time.time()
+                            if (now - self.last_press_time < DOUBLE_PRESS_DELAY) and self.trigger_released:
+                                self.fix_last_word()
                                 self.last_press_time = 0
                                 self.trigger_released = False
                             else:
-                                now = time.time()
-                                # Only trigger if key was actually released between presses
-                                if (now - self.last_press_time < DOUBLE_PRESS_DELAY) and self.trigger_released:
-                                    logger.info("⚡ Mode 1: Double Shift")
-                                    self.process_correction(mode="last_word")
-                                    self.last_press_time = 0
-                                    self.trigger_released = False
-                                else:
-                                    self.last_press_time = now
-                                    self.trigger_released = False
+                                self.last_press_time = now
+                                self.trigger_released = False
 
-                    elif event.value == 1 and event.code != self.mode2_modifier:
+                    # Buffer Tracking Logic
+                    # Only process key DOWN (1) or REPEAT (2) events
+                    elif event.value in [1, 2]:
+                        # Don't add the trigger key itself to buffer
+                        if event.code != self.trigger_btn:
+                            self.input_buffer.add(event.code, self.shift_pressed)
+
+                        # Reset double-press timer if user types other keys
                         if self.last_press_time > 0:
                             self.last_press_time = 0
 
@@ -324,23 +297,19 @@ class SkySwitcher:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="SkySwitcher Layout Corrector")
-    parser.add_argument("-d", "--device", help="Path to input device (e.g. /dev/input/eventX)")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-d", "--device", help="Path to input device")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--list", action="store_true", help="List available devices")
-
     args = parser.parse_args()
 
-    # 1. Handle --list
     if args.list:
         DeviceManager.list_available()
         sys.exit(0)
 
-    # 2. Handle --verbose
     if args.verbose:
         logger.setLevel(logging.INFO)
     else:
-        logger.setLevel(logging.WARNING)  # Show only Warnings/Errors if not verbose
+        logger.setLevel(logging.WARNING)
 
-    # 4. Run
     SkySwitcher(device_path=args.device).run()
