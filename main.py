@@ -1,6 +1,6 @@
 # main.py
 
-# SkySwitcher v0.5.7 (hotkey release trigger)
+# SkySwitcher v0.5.8 (Added CLI hotkey selection)
 #
 # Architecture:
 # - Keyboard Device Detection
@@ -13,16 +13,18 @@ import logging
 import argparse
 from evdev import InputDevice, UInput, ecodes as e, list_devices
 
-# --- ⚙️ CONFIGURATION ⚙️ ---
-VERSION = "0.5.2"
+# Fixed configurations
+VERSION = "0.5.3"
 DOUBLE_PRESS_DELAY = 0.5
 TYPING_TIMEOUT = 3.0
 
-# uncomment correct key combo for your system
-SWITCH_KEYS = [e.KEY_LEFTMETA, e.KEY_SPACE]
-# SWITCH_KEYS = [e.KEY_LEFTALT, e.KEY_LEFTSHIFT]
-# SWITCH_KEYS = [e.KEY_CAPSLOCK]
-# SWITCH_KEYS = [e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT]
+# Predefined switching styles
+HOTKEY_STYLES = {
+    "alt":  [e.KEY_LEFTALT, e.KEY_LEFTSHIFT],
+    "meta": [e.KEY_LEFTMETA, e.KEY_SPACE],  # Default
+    "caps": [e.KEY_CAPSLOCK],
+    "ctrl": [e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT],
+}
 
 
 # --- Logging Setup ---
@@ -173,7 +175,10 @@ class InputBuffer:
 
 # --- Main Application ---
 class SkySwitcher:
-    def __init__(self, device_path=None):
+    def __init__(self, device_path=None, switch_keys=None):
+        # Default to Meta+Space if nothing passed (though argparse handles defaults)
+        self.switch_keys = switch_keys if switch_keys else HOTKEY_STYLES['meta']
+
         if device_path:
             try:
                 self.device = InputDevice(device_path)
@@ -206,10 +211,10 @@ class SkySwitcher:
 
     def perform_layout_switch(self):
         """Simulates physical key press to switch layout (Bypasses KDE Window isolation)."""
-        logger.info(f"🔀 Switching Layout ({SWITCH_KEYS})...")
+        logger.info(f"🔀 Switching Layout...")
 
         # Press keys
-        for k in SWITCH_KEYS:
+        for k in self.switch_keys:
             self.ui.write(e.EV_KEY, k, 1)
         self.ui.syn()
 
@@ -217,7 +222,7 @@ class SkySwitcher:
         time.sleep(0.05)
 
         # Release keys (reversed)
-        for k in reversed(SWITCH_KEYS):
+        for k in reversed(self.switch_keys):
             self.ui.write(e.EV_KEY, k, 0)
         self.ui.syn()
 
@@ -320,7 +325,7 @@ class SkySwitcher:
                     elif event.value in [1, 2]:
                         if event.code != self.trigger_btn:
                             self.input_buffer.add(event.code, self.shift_pressed)
-                        # Якщо натиснули щось інше — скидаємо таймер подвійного кліку
+                        # Single Press detected
                         if self.last_press_time > 0:
                             self.last_press_time = 0
 
@@ -331,10 +336,25 @@ class SkySwitcher:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-d", "--device", help="Path to input device")
+    parser = argparse.ArgumentParser(description="SkySwitcher - Super simple keyboard layout corrector")
+
+    # Device argument
+    parser.add_argument("-d", "--device", help="Path to input device (optional)")
+
+    # Logging argument
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
+
+    # List devices argument
     parser.add_argument("--list", action="store_true", help="List available devices")
+
+    # Hotkey argument
+    parser.add_argument(
+        "-k", "--hotkey",
+        choices=HOTKEY_STYLES.keys(),
+        default="meta",
+        help="Layout switching key combination (default: meta)"
+    )
+
     args = parser.parse_args()
 
     if args.list:
@@ -346,4 +366,8 @@ if __name__ == "__main__":
     else:
         logger.setLevel(logging.INFO)
 
-    SkySwitcher(device_path=args.device).run()
+    # Resolve keys based on argument
+    selected_keys = HOTKEY_STYLES[args.hotkey]
+    logger.info(f"🔑 Using hotkey style: {args.hotkey} -> {selected_keys}")
+
+    SkySwitcher(device_path=args.device, switch_keys=selected_keys).run()
