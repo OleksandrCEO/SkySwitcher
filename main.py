@@ -1,31 +1,28 @@
 # main.py
 
-# SkySwitcher v0.4.6 (KDE DBus Fix)
-# Features:
-# - No-Clipboard Mode & Persistent Buffer (from v0.4.5).
-# - FIX: Replaced key-combo switching with direct System Command (DBus).
-#   This is much more reliable for KDE Plasma.
-# - Fallback: If DBus fails, tries Alt+Shift combo.
+# SkySwitcher v0.5.2 (The Golden Release)
+#
+# Architecture:
+# - Keyboard Device Detection
+# - Switching Logic: Physical HotKey Emulation to bypass KDE's "Per-Window Layout" isolation.
+# - Buffer: Simple "Backspace -> Switch -> Replay" loop.
 
 import sys
 import time
 import logging
 import argparse
-import subprocess
 from evdev import InputDevice, UInput, ecodes as e, list_devices
 
-# --- Configuration ---
-VERSION = "0.4.6"
+# --- ⚙️ CONFIGURATION ⚙️ ---
+VERSION = "0.5.2"
 DOUBLE_PRESS_DELAY = 0.5
 TYPING_TIMEOUT = 3.0
 
-# 🛠 KDE PLASMA SPECIFIC COMMAND
-# This tells KWin/KDE to switch layout directly.
-# Works on both X11 and Wayland sessions of KDE.
-SWITCH_COMMAND = ["qdbus", "org.kde.keyboard", "/Layouts", "nextLayout"]
-
-# Fallback keys if command fails (Common alternatives: Alt+Shift, Win+Space)
-FALLBACK_COMBO = [e.KEY_LEFTALT, e.KEY_LEFTSHIFT]
+# uncomment correct key combo for your system
+SWITCH_KEYS = [e.KEY_LEFTALT, e.KEY_LEFTSHIFT]
+# SWITCH_KEYS = [e.KEY_LEFTMETA, e.KEY_SPACE]
+# SWITCH_KEYS = [e.KEY_CAPSLOCK]
+# SWITCH_KEYS = [e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT]
 
 
 # --- Logging Setup ---
@@ -37,6 +34,7 @@ class EmojiFormatter(logging.Formatter):
 
 handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(EmojiFormatter())
+
 logger = logging.getLogger("SkySwitcher")
 logger.addHandler(handler)
 
@@ -70,6 +68,7 @@ def decode_keys(key_list):
     return result
 
 
+# --- Device Detection (From v0.4.9) ---
 class DeviceManager:
     IGNORED_KEYWORDS = [
         'mouse', 'webcam', 'audio', 'video', 'consumer',
@@ -80,51 +79,58 @@ class DeviceManager:
 
     @staticmethod
     def list_available():
-        devices = []
-        try:
-            devices = [InputDevice(path) for path in list_devices()]
-        except OSError:
-            print("❌ Failed to list devices.", file=sys.stderr)
-            return
-        devices.sort(key=lambda x: x.path)
         print(f"{'PATH':<20} | {'NAME'}")
         print("-" * 60)
-        for dev in devices:
-            print(f"{dev.path:<20} | {dev.name}")
+        try:
+            for path in list_devices():
+                dev = InputDevice(path)
+                print(f"{dev.path:<20} | {dev.name}")
+        except OSError as err:
+            logger.error(f"❌ Failed to list devices: {err}")
 
     @staticmethod
     def find_keyboard() -> InputDevice:
-        devices = []
+        logger.info("🔎 Scanning for keyboards...")
+        paths = []  # important for IDE linting
+
         try:
-            devices = [InputDevice(path) for path in list_devices()]
+            paths = list_devices()
         except OSError:
-            logger.error("❌ Failed to list devices. Check permissions.")
+            logger.error("❌ Failed to access input devices (Permission denied?).")
             sys.exit(1)
 
-        devices.sort(key=lambda x: x.path)
         possible_candidates = []
+        for path in paths:
+            try:
+                dev = InputDevice(path)
+            except OSError:
+                continue
 
-        for dev in devices:
             name_lower = dev.name.lower()
             if any(bad in name_lower for bad in DeviceManager.IGNORED_KEYWORDS):
                 continue
-            if e.EV_KEY not in dev.capabilities():
+
+            caps = dev.capabilities()
+            if e.EV_KEY not in caps:
                 continue
-            supported_keys = set(dev.capabilities()[e.EV_KEY])
+
+            supported_keys = set(caps[e.EV_KEY])
             if DeviceManager.REQUIRED_KEYS.issubset(supported_keys):
                 if 'keyboard' in name_lower or 'kbd' in name_lower:
-                    logger.info(f"✅ Auto-detected: {dev.name}")
+                    logger.info(f"✅ Auto-detected: {dev.name} ({dev.path.split('/')[-1]})")
                     return dev
                 possible_candidates.append(dev)
 
         if possible_candidates:
-            logger.info(f"✅ Auto-detected (best guess): {possible_candidates[0].name}")
-            return possible_candidates[0]
+            best = possible_candidates[0]
+            logger.info(f"✅ Auto-detected (best guess): {best.name} ({best.path.split('/')[-1]})")
+            return best
 
         logger.error("❌ No keyboard found. Use --list.")
         sys.exit(1)
 
 
+# --- Input Buffer (From v0.4.9) ---
 class InputBuffer:
     def __init__(self):
         self.buffer = []
@@ -133,12 +139,9 @@ class InputBuffer:
 
     def add(self, keycode, is_shifted):
         now = time.time()
-
-        # Time-based Reset
         if (now - self.last_key_time) > TYPING_TIMEOUT:
             if self.buffer:
                 self.buffer = []
-
         self.last_key_time = now
 
         if keycode == e.KEY_BACKSPACE:
@@ -168,6 +171,7 @@ class InputBuffer:
         return result
 
 
+# --- Main Application ---
 class SkySwitcher:
     def __init__(self, device_path=None):
         if device_path:
@@ -182,6 +186,7 @@ class SkySwitcher:
         self.uinput_keys = [
             e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT, e.KEY_RIGHTCTRL, e.KEY_RIGHTSHIFT,
             e.KEY_LEFTMETA, e.KEY_LEFTALT, e.KEY_BACKSPACE, e.KEY_SPACE,
+            e.KEY_CAPSLOCK, e.KEY_TAB,
             *range(e.KEY_ESC, e.KEY_MICMUTE)
         ]
 
@@ -192,91 +197,82 @@ class SkySwitcher:
             sys.exit(1)
 
         self.input_buffer = InputBuffer()
+
         self.last_press_time = 0
         self.trigger_released = True
         self.trigger_btn = e.KEY_RIGHTSHIFT
         self.shift_pressed = False
 
     def perform_layout_switch(self):
-        """Attempts to switch layout via DBus command, then fallback keys."""
+        """Simulates physical key press to switch layout (Bypasses KDE Window isolation)."""
+        logger.info(f"🔀 Switching Layout ({SWITCH_KEYS})...")
 
-        # Method 1: Try KDE DBus Command
-        try:
-            # Check if qdbus is available and run it
-            subprocess.run(SWITCH_COMMAND, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            logger.info("🔀 Switched via DBus (KDE)")
-            return
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            pass  # Fallback if command fails or qdbus not found
-
-        # Method 2: Fallback to Key Combo (Alt+Shift)
-        logger.warning("⚠️ DBus failed. Trying Alt+Shift fallback...")
-        self.send_combo(*FALLBACK_COMBO)
-
-    def send_combo(self, *keys):
-        for k in keys:
+        # Press keys
+        for k in SWITCH_KEYS:
             self.ui.write(e.EV_KEY, k, 1)
         self.ui.syn()
-        time.sleep(0.02)
-        for k in reversed(keys):
+
+        # Small delay to ensure OS registers "Hold" if needed
+        time.sleep(0.05)
+
+        # Release keys (reversed)
+        for k in reversed(SWITCH_KEYS):
             self.ui.write(e.EV_KEY, k, 0)
         self.ui.syn()
-        time.sleep(0.02)
+
+        # Wait for OS to actually switch and settle buffers
+        time.sleep(0.15)
 
     def replay_keys(self, key_sequence):
         for code, use_shift in key_sequence:
             if use_shift:
                 self.ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1)
                 self.ui.syn()
-
             self.ui.write(e.EV_KEY, code, 1)
             self.ui.syn()
             self.ui.write(e.EV_KEY, code, 0)
             self.ui.syn()
-
             if use_shift:
                 self.ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)
                 self.ui.syn()
-
             time.sleep(0.005)
 
     def fix_last_word(self):
         keys_to_replay = self.input_buffer.get_last_phrase()
-
         if not keys_to_replay:
             logger.info("⚠️ Buffer empty.")
             return
 
         readable_text = decode_keys(keys_to_replay)
-        logger.info(f"Replaying: '{readable_text}'")
+        logger.info(f"🔄 Correcting: '{readable_text}'")
 
-        count = len(keys_to_replay)
-        for _ in range(count):
+        # 1. Delete
+        for _ in range(len(keys_to_replay)):
             self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 1)
             self.ui.syn()
             self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 0)
             self.ui.syn()
             time.sleep(0.002)
 
-        # Execute Switch
+        # 2. Switch (Physical)
         self.perform_layout_switch()
-        time.sleep(0.15)  # Wait a bit for OS to process the switch
 
+        # 3. Replay
         self.replay_keys(keys_to_replay)
 
     def run(self):
-        logger.info(f"🚀 SkySwitcher v{VERSION} (KDE/DBus Mode)")
+        logger.info(f"🚀 SkySwitcher v{VERSION}")
 
+        # Grab check
         try:
             self.device.grab()
             self.device.ungrab()
         except Exception:
-            logger.warning("⚠️ Device grabbed. Running passive.")
+            pass
 
         try:
             for event in self.device.read_loop():
                 if event.type == e.EV_KEY:
-
                     if event.code in [e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT]:
                         self.shift_pressed = (event.value == 1 or event.value == 2)
 
@@ -296,7 +292,6 @@ class SkySwitcher:
                     elif event.value in [1, 2]:
                         if event.code != self.trigger_btn:
                             self.input_buffer.add(event.code, self.shift_pressed)
-
                         if self.last_press_time > 0:
                             self.last_press_time = 0
 
@@ -318,8 +313,8 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.verbose:
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging.DEBUG)
     else:
-        logger.setLevel(logging.WARNING)
+        logger.setLevel(logging.INFO)
 
     SkySwitcher(device_path=args.device).run()
