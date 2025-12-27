@@ -1,6 +1,6 @@
 # main.py
 
-# SkySwitcher v0.5.2 (The Golden Release)
+# SkySwitcher v0.5.7 (hotkey release trigger)
 #
 # Architecture:
 # - Keyboard Device Detection
@@ -19,8 +19,8 @@ DOUBLE_PRESS_DELAY = 0.5
 TYPING_TIMEOUT = 3.0
 
 # uncomment correct key combo for your system
-# SWITCH_KEYS = [e.KEY_LEFTALT, e.KEY_LEFTSHIFT]
 SWITCH_KEYS = [e.KEY_LEFTMETA, e.KEY_SPACE]
+# SWITCH_KEYS = [e.KEY_LEFTALT, e.KEY_LEFTSHIFT]
 # SWITCH_KEYS = [e.KEY_CAPSLOCK]
 # SWITCH_KEYS = [e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT]
 
@@ -202,6 +202,7 @@ class SkySwitcher:
         self.trigger_released = True
         self.trigger_btn = e.KEY_RIGHTSHIFT
         self.shift_pressed = False
+        self.pending_action = False
 
     def perform_layout_switch(self):
         """Simulates physical key press to switch layout (Bypasses KDE Window isolation)."""
@@ -253,20 +254,13 @@ class SkySwitcher:
             logger.info("⚠️ Buffer empty.")
             return
 
-        # 1. State Cleanup
-        # Ensure no virtual modifiers are lingering before we start.
+        # 1. Release Virtual Modifiers
         self.reset_modifiers()
-
-        # 2. Physical De-bouncing (CRITICAL)
-        # We pause for 150ms to allow the user to physically release the 'Shift' key.
-        # Without this delay, the OS merges the holding physical 'Shift' with our
-        # virtual 'Meta+Space', causing the system to ignore the switch command.
-        time.sleep(0.15)
 
         readable_text = decode_keys(keys_to_replay)
         logger.info(f"🔄 Correcting: '{readable_text}'")
 
-        # 3. Delete original text
+        # 2. Delete
         for _ in range(len(keys_to_replay)):
             self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 1)
             self.ui.syn()
@@ -274,12 +268,10 @@ class SkySwitcher:
             self.ui.syn()
             time.sleep(0.002)
 
-        # 4. Perform Layout Switch
-        # Thanks to the delay above, the input channel should now be clear
-        # of the physical Shift signal, ensuring a clean Meta+Space execution.
+        # 3. Switch (Physical)
         self.perform_layout_switch()
 
-        # 5. Replay corrected text
+        # 4. Replay
         self.replay_keys(keys_to_replay)
 
     def run(self):
@@ -295,25 +287,40 @@ class SkySwitcher:
         try:
             for event in self.device.read_loop():
                 if event.type == e.EV_KEY:
+                    # Tracking Shift state for typing (upper/lower case)
                     if event.code in [e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT]:
                         self.shift_pressed = (event.value == 1 or event.value == 2)
 
+                    # --- LOGIC START ---
                     if event.code == self.trigger_btn:
-                        if event.value == 0:
-                            self.trigger_released = True
-                        elif event.value == 1:
+
+                        # === PRESS (value 1) ===
+                        if event.value == 1:
                             now = time.time()
                             if (now - self.last_press_time < DOUBLE_PRESS_DELAY) and self.trigger_released:
-                                self.fix_last_word()
+                                self.pending_action = True
                                 self.last_press_time = 0
-                                self.trigger_released = False
                             else:
                                 self.last_press_time = now
-                                self.trigger_released = False
+                                self.pending_action = False
 
+                            self.trigger_released = False
+
+                        # === RELEASE (value 0) ===
+                        elif event.value == 0:
+                            self.trigger_released = True
+
+                            # Double Press detected
+                            if self.pending_action:
+                                logger.info("✨ Trigger confirmed (on release)")
+                                self.fix_last_word()
+                                self.pending_action = False
+
+                    # Tracking other keys
                     elif event.value in [1, 2]:
                         if event.code != self.trigger_btn:
                             self.input_buffer.add(event.code, self.shift_pressed)
+                        # Якщо натиснули щось інше — скидаємо таймер подвійного кліку
                         if self.last_press_time > 0:
                             self.last_press_time = 0
 
