@@ -4,6 +4,8 @@
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
+> **⚠️ DEPRECATED:** This is an old and inefficient version of the switcher. The new, improved version is available as **[MagShift](https://github.com/OleksandrCEO/MagShift) Project**.
+
 **SkySwitcher** is a minimalist, context-aware keyboard layout switcher for Linux (Wayland & X11). It fixes what you just typed without making you retype it.
 
 Designed with **NixOS Flakes** in mind for reproducible and secure deployment.
