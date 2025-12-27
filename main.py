@@ -1,10 +1,10 @@
 # main.py
 
-# SkySwitcher v0.4.1
+# SkySwitcher v0.4.2 (Fixed spacing bug)
 # Merged functionality:
 # - Core Logic: Robust v0.3.8 architecture (Reliable clipboard, no sudo hacks).
 # - CLI Features: Restored v0.2.1 arguments (--list, --device, --verbose).
-# - Fix: Added release validation to prevent accidental triggering while holding Shift.
+# - Fix v0.4.2: Handles trailing spaces correctly (treats space as a normal symbol).
 
 import sys
 import time
@@ -14,7 +14,7 @@ import argparse
 from evdev import InputDevice, UInput, ecodes as e, list_devices
 
 # --- Configuration ---
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 DOUBLE_PRESS_DELAY = 0.5
 LAYOUT_SWITCH_COMBO = [e.KEY_LEFTMETA, e.KEY_SPACE]
 
@@ -33,8 +33,9 @@ logger.addHandler(handler)
 # Note: Level is set in __main__ based on arguments
 
 # --- Layout Database ---
-LAYOUT_US = "`qwertyuiop[]\\asdfghjkl;'zxcvbnm,./~@#$%^&QWERTYUIOP{}|ASDFGHJKL:\"ZXCVBNM<>?"
-LAYOUT_UA = "'йцукенгшщзхїґфівапролджєячсмитьбю.₴\"№;%:?ЙЦУКЕНГШЩЗХЇҐФІВАПРОЛДЖЄЯЧСМИТЬБЮ,"
+# Added space at the end of both layouts to treat it as a normal symbol
+LAYOUT_US = "`qwertyuiop[]\\asdfghjkl;'zxcvbnm,./~@#$%^&QWERTYUIOP{}|ASDFGHJKL:\"ZXCVBNM<>? "
+LAYOUT_UA = "'йцукенгшщзхїґфівапролджєячсмитьбю.₴\"№;%:?ЙЦУКЕНГШЩЗХЇҐФІВАПРОЛДЖЄЯЧСМИТЬБЮ, "
 LAYOUTS_DB = {
     'us': LAYOUT_US,
     'ua': LAYOUT_UA,
@@ -223,12 +224,18 @@ class SkySwitcher:
             return
 
         target_text = full_text
+        trailing_spaces_count = 0
+
         if mode == "last_word":
             if not full_text.strip():
                 self.set_clipboard(backup_clipboard)
                 self.send_combo(e.KEY_RIGHT)
                 return
-            target_text = full_text.split()[-1]
+
+            # Logic update: Handle trailing spaces correctly
+            full_text_stripped = full_text.rstrip()
+            trailing_spaces_count = len(full_text) - len(full_text_stripped)
+            target_text = full_text_stripped.split()[-1]
 
         converted = self.processor.smart_translate(target_text)
 
@@ -238,13 +245,18 @@ class SkySwitcher:
                 self.send_combo(e.KEY_RIGHT)
             return
 
-        logger.info(f"Correcting: '{target_text}' -> '{converted}'")
-        self.set_clipboard(converted)
+        # Restore trailing spaces to the converted text
+        final_text = converted + (" " * trailing_spaces_count)
+
+        logger.info(f"Correcting: '{target_text}' -> '{converted}' (spaces: {trailing_spaces_count})")
+        self.set_clipboard(final_text)
         time.sleep(0.1)
 
         if mode == "last_word":
             self.send_combo(e.KEY_RIGHT)
-            for _ in range(len(target_text)):
+            # Delete word length AND trailing spaces
+            total_backspaces = len(target_text) + trailing_spaces_count
+            for _ in range(total_backspaces):
                 self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 1)
                 self.ui.syn()
                 time.sleep(0.005)
