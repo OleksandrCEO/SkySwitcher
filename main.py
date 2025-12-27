@@ -19,8 +19,8 @@ DOUBLE_PRESS_DELAY = 0.5
 TYPING_TIMEOUT = 3.0
 
 # uncomment correct key combo for your system
-SWITCH_KEYS = [e.KEY_LEFTALT, e.KEY_LEFTSHIFT]
-# SWITCH_KEYS = [e.KEY_LEFTMETA, e.KEY_SPACE]
+# SWITCH_KEYS = [e.KEY_LEFTALT, e.KEY_LEFTSHIFT]
+SWITCH_KEYS = [e.KEY_LEFTMETA, e.KEY_SPACE]
 # SWITCH_KEYS = [e.KEY_CAPSLOCK]
 # SWITCH_KEYS = [e.KEY_LEFTCTRL, e.KEY_LEFTSHIFT]
 
@@ -237,16 +237,36 @@ class SkySwitcher:
                 self.ui.syn()
             time.sleep(0.005)
 
+    def reset_modifiers(self):
+        """Force release all modifiers to prevent shortcut pollution"""
+        modifiers = [e.KEY_LEFTSHIFT, e.KEY_RIGHTSHIFT, e.KEY_LEFTCTRL,
+                     e.KEY_RIGHTCTRL, e.KEY_LEFTALT, e.KEY_LEFTMETA]
+        for key in modifiers:
+            self.ui.write(e.EV_KEY, key, 0)
+
+        self.ui.syn()
+        time.sleep(0.02)
+
     def fix_last_word(self):
         keys_to_replay = self.input_buffer.get_last_phrase()
         if not keys_to_replay:
             logger.info("⚠️ Buffer empty.")
             return
 
+        # 1. State Cleanup
+        # Ensure no virtual modifiers are lingering before we start.
+        self.reset_modifiers()
+
+        # 2. Physical De-bouncing (CRITICAL)
+        # We pause for 150ms to allow the user to physically release the 'Shift' key.
+        # Without this delay, the OS merges the holding physical 'Shift' with our
+        # virtual 'Meta+Space', causing the system to ignore the switch command.
+        time.sleep(0.15)
+
         readable_text = decode_keys(keys_to_replay)
         logger.info(f"🔄 Correcting: '{readable_text}'")
 
-        # 1. Delete
+        # 3. Delete original text
         for _ in range(len(keys_to_replay)):
             self.ui.write(e.EV_KEY, e.KEY_BACKSPACE, 1)
             self.ui.syn()
@@ -254,10 +274,12 @@ class SkySwitcher:
             self.ui.syn()
             time.sleep(0.002)
 
-        # 2. Switch (Physical)
+        # 4. Perform Layout Switch
+        # Thanks to the delay above, the input channel should now be clear
+        # of the physical Shift signal, ensuring a clean Meta+Space execution.
         self.perform_layout_switch()
 
-        # 3. Replay
+        # 5. Replay corrected text
         self.replay_keys(keys_to_replay)
 
     def run(self):
