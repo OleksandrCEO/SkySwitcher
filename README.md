@@ -11,14 +11,12 @@ Designed with **NixOS Flakes** in mind for reproducible and secure deployment.
 ## ✨ Features
 
 * **⚡ Double Right Shift:** Tap `Right Shift` twice to switch layout (e.g., English ↔ Ukrainian).
-* **📝 Auto-Correction:** It automatically corrects the **last typed word** when you switch.
-    * *Typed `ghbdsn`? -> Double Shift -> Becomes `привіт`.*
-* **🎯 Selection Fix:** Hold `Right Ctrl` + press `Right Shift` to fix the currently **selected text**.
+* **🖋️ Auto-Correction:** It automatically corrects the **last typed phrase** when you switch. Typed `ghbdsn`? -> Double Shift -> Becomes `привіт`.
 * **🔒 Secure:** Runs with standard user permissions (via `uinput` group), no `sudo` required after setup.
 * **❄️ Pure Nix:** Zero global dependencies. Builds cleanly from the Nix Store.
 
 
-## Clipboard Version
+## 📝 Clipboard Version
 
 Old version with clipboard dependency and extra features (like handling selected text) available in extra branch: [feature-clipboard](https://github.com/OleksandrCEO/SkySwitcher/tree/feature-clipboard)
 
